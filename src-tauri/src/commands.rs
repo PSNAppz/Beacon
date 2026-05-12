@@ -3,6 +3,7 @@ use crate::error::{AppError, AppResult};
 use crate::ssh::{self, SessionManager, SshTestResult};
 use crate::ssh::docker::{Container, ContainerStats, LogLine, RemoteCmdResult};
 use crate::storage::{self, Category, Session, SessionInput, Vault, VaultState};
+use crate::transfer::{ImportPreview};
 use std::sync::Arc;
 use tauri::State;
 
@@ -214,6 +215,40 @@ pub fn snapshot_container_logs(
         .map(|l| format!("{} {}\n", l.ts.as_deref().unwrap_or(""), l.text))
         .collect();
     std::fs::write(&path, content).map_err(|e| AppError::Other(e.to_string()))
+}
+
+// ─── Profile export / import ──────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn export_sessions(
+    state: State<'_, VaultState>,
+    ids: Vec<String>,
+    password: String,
+    path: String,
+) -> AppResult<()> {
+    with_vault(&state, |v| crate::transfer::export_sessions(v, &ids, &password, &path))
+}
+
+#[tauri::command]
+pub fn preview_import(
+    state: State<'_, VaultState>,
+    path: String,
+    password: String,
+) -> AppResult<ImportPreview> {
+    with_vault(&state, |v| crate::transfer::preview_import(v, &path, &password))
+}
+
+#[tauri::command]
+pub fn import_sessions(
+    state: State<'_, VaultState>,
+    path: String,
+    password: String,
+    selected_ids: Vec<String>,
+    conflict_strategy: String,
+) -> AppResult<Vec<Session>> {
+    with_vault(&state, |v| {
+        crate::transfer::import_sessions(v, &path, &password, &selected_ids, &conflict_strategy)
+    })
 }
 
 // ─── Vault password change ─────────────────────────────────────────────────────

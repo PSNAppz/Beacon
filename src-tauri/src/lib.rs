@@ -4,6 +4,7 @@ mod crypto;
 mod error;
 mod ssh;
 mod storage;
+mod transfer;
 
 use std::sync::Arc;
 
@@ -44,6 +45,9 @@ pub fn run() {
             commands::delete_category,
             commands::snapshot_container_logs,
             commands::change_vault_password,
+            commands::export_sessions,
+            commands::preview_import,
+            commands::import_sessions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

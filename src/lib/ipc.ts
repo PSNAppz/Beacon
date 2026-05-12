@@ -104,6 +104,22 @@ export interface ContainerStats {
   pids: string;
 }
 
+export interface ImportSessionPreview {
+  id: string;
+  name: string;
+  host: string;
+  username: string;
+  auth_kind: AuthKind;
+  has_secret: boolean;
+  has_aws_secret: boolean;
+  category_name: string | null;
+  conflict: "same_id" | "same_name" | null;
+}
+
+export interface ImportPreview {
+  sessions: ImportSessionPreview[];
+}
+
 export const api = {
   vaultIsInitialized: () => invoke<boolean>("vault_is_initialized"),
   vaultIsUnlocked: () => invoke<boolean>("vault_is_unlocked"),
@@ -139,6 +155,16 @@ export const api = {
   deleteCategory: (id: string) => invoke<void>("delete_category", { id }),
   snapshotContainerLogs: (sessionId: string, containerId: string, path: string) =>
     invoke<void>("snapshot_container_logs", { sessionId, containerId, path }),
+  exportSessions: (ids: string[], password: string, path: string) =>
+    invoke<void>("export_sessions", { ids, password, path }),
+  previewImport: (path: string, password: string) =>
+    invoke<ImportPreview>("preview_import", { path, password }),
+  importSessions: (
+    path: string,
+    password: string,
+    selectedIds: string[],
+    conflictStrategy: string,
+  ) => invoke<Session[]>("import_sessions", { path, password, selectedIds, conflictStrategy }),
 };
 
 export interface RemoteCmdResult {

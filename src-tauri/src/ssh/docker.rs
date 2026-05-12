@@ -242,7 +242,8 @@ pub async fn run_remote_command(
         .channel_open_session()
         .await
         .map_err(|e| AppError::Ssh(format!("open channel: {e}")))?;
-    ch.exec(true, command)
+    let wrapped = wrap_command(command, conn.use_sudo);
+    ch.exec(true, wrapped.as_str())
         .await
         .map_err(|e| AppError::Ssh(format!("exec: {e}")))?;
 
