@@ -3,6 +3,8 @@ import { Link } from "react-router-dom";
 import { api, errorMessage, Session, SshTestResult } from "../lib/ipc";
 import { useApp } from "../lib/store";
 import { SessionWizard } from "../features/sessions/SessionWizard";
+import { ExportModal } from "../features/sessions/ExportModal";
+import { ImportModal } from "../features/sessions/ImportModal";
 import { Button, Toast } from "../components/ui";
 
 export function HomePage() {
@@ -36,6 +38,8 @@ export function HomePage() {
 
   const [wizardOpen, setWizardOpen] = useState(false);
   const [editing, setEditing] = useState<Session | null>(null);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ kind: "ok" | "error" | "info"; message: string } | null>(null);
 
@@ -80,7 +84,11 @@ export function HomePage() {
               Connect to a remote host to view Docker containers and stream logs.
             </p>
           </div>
-          <Button variant="primary" onClick={openNew}>+ New session</Button>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" onClick={() => setImportOpen(true)}>Import</Button>
+            <Button variant="ghost" onClick={() => setExportOpen(true)}>Export</Button>
+            <Button variant="primary" onClick={openNew}>+ New session</Button>
+          </div>
         </div>
 
         <section className="space-y-6">
@@ -130,6 +138,8 @@ export function HomePage() {
       </div>
 
       <SessionWizard open={wizardOpen} onClose={() => setWizardOpen(false)} editing={editing} />
+      <ExportModal open={exportOpen} onClose={() => setExportOpen(false)} />
+      <ImportModal open={importOpen} onClose={() => { setImportOpen(false); refresh(); }} />
       {toast && <Toast kind={toast.kind} message={toast.message} />}
     </div>
   );
