@@ -52,7 +52,13 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn encode_msg(msg_type: &str, seq: i64, payload: Vec<u8>) -> Vec<u8> {
+// SSM payload type constants (newer agent protocol, agent >= 3.x)
+const PT_OUTPUT: u32 = 1;
+const PT_HS_REQUEST: u32 = 5;
+const PT_HS_RESPONSE: u32 = 6;
+const PT_HS_COMPLETE: u32 = 7;
+
+fn encode_msg(msg_type: &str, seq: i64, payload: Vec<u8>, payload_type: u32) -> Vec<u8> {
     let mut digest = [0u8; 32];
     let mut h = Sha256::new();
     h.update(&payload);
@@ -74,7 +80,7 @@ fn encode_msg(msg_type: &str, seq: i64, payload: Vec<u8>) -> Vec<u8> {
     buf.extend_from_slice(&0u64.to_be_bytes()); // flags
     buf.extend_from_slice(&msg_id);
     buf.extend_from_slice(&digest);
-    buf.extend_from_slice(&0u32.to_be_bytes()); // payloadType
+    buf.extend_from_slice(&payload_type.to_be_bytes());
     buf.extend_from_slice(&plen.to_be_bytes());
     buf.extend_from_slice(&payload);
     buf
@@ -82,6 +88,7 @@ fn encode_msg(msg_type: &str, seq: i64, payload: Vec<u8>) -> Vec<u8> {
 
 struct ParsedMsg {
     msg_type: String,
+    payload_type: u32,
     sequence_number: i64,
     message_id: [u8; 16],
     payload: Vec<u8>,
@@ -98,12 +105,13 @@ fn decode_msg(data: &[u8]) -> Option<ParsedMsg> {
         .to_string();
     let sequence_number = i64::from_be_bytes(data[48..56].try_into().ok()?);
     let message_id: [u8; 16] = data[64..80].try_into().ok()?;
+    let payload_type = u32::from_be_bytes(data[112..116].try_into().ok()?);
     let plen = u32::from_be_bytes(data[116..120].try_into().ok()?) as usize;
     if data.len() < HDR_SIZE + plen {
         return None;
     }
     let payload = data[HDR_SIZE..HDR_SIZE + plen].to_vec();
-    Some(ParsedMsg { msg_type, sequence_number, message_id, payload })
+    Some(ParsedMsg { msg_type, payload_type, sequence_number, message_id, payload })
 }
 
 fn make_ack(msg: &ParsedMsg) -> Vec<u8> {
@@ -114,7 +122,7 @@ fn make_ack(msg: &ParsedMsg) -> Vec<u8> {
         is_sequential_message: true,
     })
     .unwrap_or_default();
-    encode_msg(TYPE_ACK, 0, payload)
+    encode_msg(TYPE_ACK, 0, payload, 0)
 }
 
 // ── Handshake JSON types ──────────────────────────────────────────────────────
@@ -143,8 +151,9 @@ struct HandshakeResponse {
 #[serde(rename_all = "PascalCase")]
 struct ProcessedAction {
     action_type: String,
-    action_result: u32,
-    action_parameters: serde_json::Value,
+    action_status: u32,
+    action_result: serde_json::Value,
+    error: String,
 }
 
 #[derive(Serialize)]
@@ -234,20 +243,32 @@ type WsRx   = futures::stream::SplitStream<WsStream>;
 // ── Synchronous handshake (runs before spawning the pump) ─────────────────────
 
 /// Sends the session token and completes the optional SSM handshake.
-/// Returns `Some(payload)` if the first data frame arrived during the handshake
-/// (older agents skip straight to data), or `None` after a normal handshake.
-/// Returns a descriptive `AppError` instead of silently failing.
+/// Returns `(carry, next_seq)` where `carry` is any SSH data that arrived
+/// during the handshake loop, and `next_seq` is the first unused outbound
+/// sequence number for `input_stream_data` (so the data pump doesn't reuse
+/// a sequence number already ACKed by the agent during handshake).
 async fn do_handshake(
     ws_sink: &mut WsSink,
     ws_rx: &mut WsRx,
     token: String,
-) -> AppResult<Option<Vec<u8>>> {
+) -> AppResult<(Option<Vec<u8>>, i64)> {
+    let open_msg = serde_json::json!({
+        "MessageSchemaVersion": "1.0",
+        "RequestId": uuid::Uuid::new_v4().to_string(),
+        "TokenValue": token,
+        "ClientInstanceId": "",
+        "ClientId": uuid::Uuid::new_v4().to_string(),
+    })
+    .to_string();
     ws_sink
-        .send(WsMessage::Text(token))
+        .send(WsMessage::Text(open_msg))
         .await
         .map_err(|e| AppError::Ssh(format!("SSM token send failed: {e}")))?;
 
     let hs_start = now_ms();
+    let mut send_seq: i64 = 0;
+    // Guard against agent retry floods: only send HandshakeResponse once.
+    let mut hs_responded = false;
 
     loop {
         let msg = tokio::time::timeout(std::time::Duration::from_secs(15), ws_rx.next())
@@ -272,21 +293,27 @@ async fn do_handshake(
         let Some(parsed) = decode_msg(&bytes) else { continue };
 
         match parsed.msg_type.as_str() {
-            TYPE_HS_REQ => {
-                let processed = if let Ok(req) =
-                    serde_json::from_slice::<HandshakeRequest>(&parsed.payload)
-                {
-                    req.requested_client_actions
-                        .into_iter()
-                        .map(|a| ProcessedAction {
-                            action_type: a.action_type,
-                            action_result: 0,
-                            action_parameters: serde_json::json!({}),
-                        })
-                        .collect()
-                } else {
-                    vec![]
-                };
+            // Newer agents (3.x+): handshake request arrives as output_stream_data
+            // with payloadType=5. Client responds with input_stream_data pt=6.
+            // The agent then sends output_stream_data pt=7 to confirm — we wait for that.
+            // Guard: agent may send many retry copies before our response reaches it;
+            // only respond once and ignore duplicates (same as Python test's hs_done flag).
+            TYPE_OUTPUT if parsed.payload_type == PT_HS_REQUEST => {
+                if hs_responded {
+                    continue; // ignore agent retry floods
+                }
+                let req = serde_json::from_slice::<HandshakeRequest>(&parsed.payload)
+                    .unwrap_or(HandshakeRequest { requested_client_actions: vec![] });
+                let processed = req
+                    .requested_client_actions
+                    .into_iter()
+                    .map(|a| ProcessedAction {
+                        action_type: a.action_type,
+                        action_status: 1,
+                        action_result: serde_json::Value::Null,
+                        error: String::new(),
+                    })
+                    .collect();
 
                 let resp_bytes = serde_json::to_vec(&HandshakeResponse {
                     client_version: "1.2.398.0".to_string(),
@@ -296,7 +323,43 @@ async fn do_handshake(
                 .unwrap_or_default();
 
                 ws_sink
-                    .send(WsMessage::Binary(encode_msg(TYPE_HS_RESP, 0, resp_bytes)))
+                    .send(WsMessage::Binary(encode_msg(TYPE_INPUT, send_seq, resp_bytes, PT_HS_RESPONSE)))
+                    .await
+                    .map_err(|e| AppError::Ssh(format!("SSM handshake_response send failed: {e}")))?;
+                send_seq += 1;
+                hs_responded = true;
+                // Loop back — wait for agent to send pt=7 HandshakeComplete.
+            }
+            // Agent confirms handshake succeeded (newer 3.x protocol).
+            TYPE_OUTPUT if parsed.payload_type == PT_HS_COMPLETE => {
+                return Ok((None, send_seq));
+            }
+            // Older agents: dedicated handshake_request message type.
+            // These use dedicated message types (not input_stream_data), so they
+            // don't consume sequence numbers in the input_stream_data space.
+            TYPE_HS_REQ => {
+                let req = serde_json::from_slice::<HandshakeRequest>(&parsed.payload)
+                    .unwrap_or(HandshakeRequest { requested_client_actions: vec![] });
+                let processed = req
+                    .requested_client_actions
+                    .into_iter()
+                    .map(|a| ProcessedAction {
+                        action_type: a.action_type,
+                        action_status: 1,
+                        action_result: serde_json::Value::Null,
+                        error: String::new(),
+                    })
+                    .collect();
+
+                let resp_bytes = serde_json::to_vec(&HandshakeResponse {
+                    client_version: "1.2.398.0".to_string(),
+                    processed_client_actions: processed,
+                    errors: vec![],
+                })
+                .unwrap_or_default();
+
+                ws_sink
+                    .send(WsMessage::Binary(encode_msg(TYPE_HS_RESP, 0, resp_bytes, 0)))
                     .await
                     .map_err(|e| AppError::Ssh(format!("SSM handshake_response send failed: {e}")))?;
 
@@ -307,16 +370,16 @@ async fn do_handshake(
                 .unwrap_or_default();
 
                 ws_sink
-                    .send(WsMessage::Binary(encode_msg(TYPE_HS_DONE, 0, complete_bytes)))
+                    .send(WsMessage::Binary(encode_msg(TYPE_HS_DONE, 0, complete_bytes, 0)))
                     .await
                     .map_err(|e| AppError::Ssh(format!("SSM handshake_complete send failed: {e}")))?;
 
-                return Ok(None);
+                return Ok((None, send_seq));
             }
             TYPE_OUTPUT => {
                 // Older agents skip the handshake — first message is already SSH data.
                 let _ = ws_sink.send(WsMessage::Binary(make_ack(&parsed))).await;
-                return Ok(Some(parsed.payload));
+                return Ok((Some(parsed.payload), send_seq));
             }
             TYPE_CLOSED => {
                 return Err(AppError::Ssh(
@@ -335,33 +398,46 @@ async fn data_pump(
     mut ws_rx: WsRx,
     data_tx: mpsc::UnboundedSender<Vec<u8>>,
     mut data_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    initial_send_seq: i64,
 ) {
-    let mut send_seq: i64 = 0;
+    let mut send_seq: i64 = initial_send_seq;
+    eprintln!("[SSM pump] started, initial send_seq={send_seq}");
     loop {
         tokio::select! {
             ws_msg = ws_rx.next() => {
                 match ws_msg {
                     Some(Ok(WsMessage::Binary(bytes))) => {
                         let Some(parsed) = decode_msg(&bytes) else { continue };
+                        eprintln!("[SSM pump] recv: type={} pt={} seq={} len={}",
+                            parsed.msg_type, parsed.payload_type, parsed.sequence_number, parsed.payload.len());
                         match parsed.msg_type.as_str() {
-                            TYPE_OUTPUT => {
+                            TYPE_OUTPUT if parsed.payload_type == PT_OUTPUT
+                                        || parsed.payload_type == 0 => {
                                 let _ = ws_sink.send(WsMessage::Binary(make_ack(&parsed))).await;
                                 if data_tx.send(parsed.payload).is_err() { return; }
                             }
-                            TYPE_CLOSED => return,
+                            TYPE_OUTPUT => {} // handshake/flag frames after handshake — ignore
+                            TYPE_CLOSED => {
+                                eprintln!("[SSM pump] channel_closed received, shutting down");
+                                return;
+                            }
                             _ => {}
                         }
                     }
                     Some(Ok(WsMessage::Ping(data))) => {
                         let _ = ws_sink.send(WsMessage::Pong(data)).await;
                     }
-                    None | Some(Ok(WsMessage::Close(_))) | Some(Err(_)) => return,
+                    None | Some(Ok(WsMessage::Close(_))) | Some(Err(_)) => {
+                        eprintln!("[SSM pump] WebSocket closed/error, shutting down");
+                        return;
+                    }
                     _ => {}
                 }
             }
             outgoing = data_rx.recv() => {
                 let Some(ssh_data) = outgoing else { return };
-                let msg = encode_msg(TYPE_INPUT, send_seq, ssh_data);
+                eprintln!("[SSM pump] send: input_stream_data seq={send_seq} len={}", ssh_data.len());
+                let msg = encode_msg(TYPE_INPUT, send_seq, ssh_data, PT_OUTPUT);
                 send_seq += 1;
                 if ws_sink.send(WsMessage::Binary(msg)).await.is_err() { return; }
             }
@@ -446,7 +522,7 @@ pub async fn open_ssm_stream(
 
     // Handshake runs synchronously — errors propagate to the caller instead of
     // silently killing a background task.
-    let carry = do_handshake(&mut ws_sink, &mut ws_rx, token).await?;
+    let (carry, next_seq) = do_handshake(&mut ws_sink, &mut ws_rx, token).await?;
 
     // Channels: pump → SsmStream (SSH data in) and SsmStream → pump (SSH data out).
     let (pump_tx, stream_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -456,7 +532,7 @@ pub async fn open_ssm_stream(
         let _ = pump_tx.send(data);
     }
 
-    tokio::spawn(data_pump(ws_sink, ws_rx, pump_tx, pump_rx));
+    tokio::spawn(data_pump(ws_sink, ws_rx, pump_tx, pump_rx, next_seq));
 
     Ok(SsmStream {
         rx: stream_rx,

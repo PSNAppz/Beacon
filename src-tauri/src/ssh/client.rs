@@ -37,7 +37,7 @@ pub struct SshTestResult {
 
 fn cfg() -> Arc<Config> {
     Arc::new(Config {
-        inactivity_timeout: Some(Duration::from_secs(300)),
+        inactivity_timeout: Some(Duration::from_secs(20)), // debug: short timeout
         keepalive_interval: Some(Duration::from_secs(30)),
         ..Default::default()
     })
