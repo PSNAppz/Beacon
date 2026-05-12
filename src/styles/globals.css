@@ -1,0 +1,39 @@
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --bg: 14 16 20;
+    --surface: 20 23 28;
+    --surface-2: 27 31 38;
+    --border: 38 43 52;
+    --fg: 232 234 238;
+    --muted: 148 156 168;
+    --accent: 120 200 255;
+    --danger: 255 110 110;
+    --warn: 255 196 90;
+    --ok: 120 220 150;
+  }
+
+  html, body, #root {
+    height: 100%;
+  }
+
+  body {
+    font-family: theme("fontFamily.sans");
+    font-feature-settings: "cv11", "ss01";
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Subtle scrollbar in dark theme */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: rgb(var(--border)); border-radius: 8px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgb(var(--surface-2)); }
+}
