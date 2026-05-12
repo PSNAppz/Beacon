@@ -70,6 +70,7 @@ impl Vault {
     }
 
     fn ensure_columns(conn: &Connection) -> AppResult<()> {
+        // use_sudo (original migration)
         let has_use_sudo: bool = conn
             .query_row(
                 "SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'use_sudo'",
@@ -83,6 +84,52 @@ impl Vault {
                 [],
             )?;
         }
+
+        // categories table
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS categories (
+                 id         TEXT PRIMARY KEY,
+                 name       TEXT NOT NULL UNIQUE,
+                 created_at INTEGER NOT NULL
+             );",
+        )?;
+
+        // category_id on sessions (no FK in ALTER TABLE — SQLite limitation)
+        let has_category_id: bool = conn
+            .query_row(
+                "SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'category_id'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if !has_category_id {
+            conn.execute("ALTER TABLE sessions ADD COLUMN category_id TEXT", [])?;
+        }
+
+        // SSM columns + AWS credential columns
+        for (col, def) in [
+            ("use_ssm", "INTEGER NOT NULL DEFAULT 0"),
+            ("ssm_instance_id", "TEXT"),
+            ("aws_region", "TEXT"),
+            ("aws_profile", "TEXT"),
+            ("aws_access_key_id", "TEXT"),
+            ("aws_secret_b64", "TEXT"),
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!("SELECT 1 FROM pragma_table_info('sessions') WHERE name = '{col}'"),
+                    [],
+                    |_| Ok(true),
+                )
+                .unwrap_or(false);
+            if !has {
+                conn.execute(
+                    &format!("ALTER TABLE sessions ADD COLUMN {col} {def}"),
+                    [],
+                )?;
+            }
+        }
+
         Ok(())
     }
 
@@ -115,6 +162,88 @@ impl Vault {
             params![salt_b64, verifier, now_unix()],
         )?;
         Ok(Self { conn: Arc::new(Mutex::new(conn)), key })
+    }
+
+    /// Re-key the vault: verify old password, derive a new key, re-encrypt all
+    /// secrets, and swap the in-memory key atomically.
+    pub fn change_password(&mut self, old_password: &str, new_password: &str) -> AppResult<()> {
+        // Read stored salt + verifier.
+        let (salt_b64, verifier_b64): (String, String) = {
+            let conn = self.conn.lock();
+            conn.query_row(
+                "SELECT salt_b64, verifier_b64 FROM vault_meta WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|_| AppError::NotFound)?
+        };
+
+        let salt_bytes = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            &salt_b64,
+        )
+        .map_err(|e| AppError::Crypto(format!("salt b64: {e}")))?;
+
+        // Verify the old password (re-derive + decrypt verifier).
+        let old_key = VaultKey::derive(old_password, &salt_bytes)?;
+        old_key.decrypt_from_b64(&verifier_b64)?;
+
+        // Derive new key with a fresh random salt.
+        let new_salt = random_salt();
+        let new_key = VaultKey::derive(new_password, &new_salt)?;
+        let new_verifier = new_key.encrypt_to_b64(VAULT_VERIFIER_PLAINTEXT)?;
+        let new_salt_b64 =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, new_salt);
+
+        // Re-encrypt all session secrets under the new key.
+        {
+            let conn = self.conn.lock();
+
+            let ids_secrets: Vec<(String, String)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT id, secret_b64 FROM sessions WHERE secret_b64 IS NOT NULL",
+                )?;
+                let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                rows
+            };
+
+            for (id, secret_b64) in ids_secrets {
+                let plaintext = old_key.decrypt_from_b64(&secret_b64)?;
+                let re_encrypted = new_key.encrypt_to_b64(&plaintext)?;
+                conn.execute(
+                    "UPDATE sessions SET secret_b64 = ?1 WHERE id = ?2",
+                    params![re_encrypted, id],
+                )?;
+            }
+
+            // Re-encrypt AWS secret access keys
+            let aws_rows: Vec<(String, String)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT id, aws_secret_b64 FROM sessions WHERE aws_secret_b64 IS NOT NULL",
+                )?;
+                let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                rows
+            };
+            for (id, aws_b64) in aws_rows {
+                let plaintext = old_key.decrypt_from_b64(&aws_b64)?;
+                let re_encrypted = new_key.encrypt_to_b64(&plaintext)?;
+                conn.execute(
+                    "UPDATE sessions SET aws_secret_b64 = ?1 WHERE id = ?2",
+                    params![re_encrypted, id],
+                )?;
+            }
+
+            conn.execute(
+                "UPDATE vault_meta SET salt_b64 = ?1, verifier_b64 = ?2 WHERE id = 1",
+                params![new_salt_b64, new_verifier],
+            )?;
+        }
+
+        // Swap the in-memory key last — only after the DB write succeeds.
+        self.key = new_key;
+        Ok(())
     }
 
     /// Open an existing vault and verify the master password.

@@ -3,6 +3,12 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type AuthKind = "key" | "password" | "agent";
 
+export interface Category {
+  id: string;
+  name: string;
+  created_at: number;
+}
+
 export interface Session {
   id: string;
   name: string;
@@ -19,6 +25,13 @@ export interface Session {
   last_connected: number | null;
   created_at: number;
   updated_at: number;
+  category_id: string | null;
+  use_ssm: boolean;
+  ssm_instance_id: string | null;
+  aws_region: string | null;
+  aws_profile: string | null;
+  aws_access_key_id: string | null;
+  has_aws_secret: boolean;
 }
 
 export interface SessionInput {
@@ -35,6 +48,14 @@ export interface SessionInput {
   color: string;
   read_only: boolean;
   use_sudo: boolean;
+  category_id: string | null;
+  use_ssm: boolean;
+  ssm_instance_id: string | null;
+  aws_region: string | null;
+  aws_profile: string | null;
+  aws_access_key_id: string | null;
+  /** Pass null to leave existing unchanged (edit). Pass "" to clear. */
+  aws_secret_access_key: string | null;
 }
 
 export interface SshTestResult {
@@ -72,6 +93,17 @@ export interface LogEnd {
   reason: string;
 }
 
+export interface ContainerStats {
+  id: string;
+  name: string;
+  cpu_perc: string;
+  mem_usage: string;
+  mem_perc: string;
+  net_io: string;
+  block_io: string;
+  pids: string;
+}
+
 export const api = {
   vaultIsInitialized: () => invoke<boolean>("vault_is_initialized"),
   vaultIsUnlocked: () => invoke<boolean>("vault_is_unlocked"),
@@ -91,6 +123,22 @@ export const api = {
   stopLogStream: (streamId: string) => invoke<void>("stop_log_stream", { streamId }),
   runRemoteCommand: (id: string, command: string) =>
     invoke<RemoteCmdResult>("run_remote_command", { id, command }),
+  pollDockerStats: (sessionId: string) =>
+    invoke<ContainerStats[]>("poll_docker_stats", { sessionId }),
+  archiveLogBatch: (sessionId: string, containerId: string, lines: LogLine[]) =>
+    invoke<void>("archive_log_batch", { sessionId, containerId, lines }),
+  getArchivedLogs: (sessionId: string, containerId: string, limit?: number) =>
+    invoke<LogLine[]>("get_archived_logs", { sessionId, containerId, limit }),
+  saveLogExport: (path: string, content: string) =>
+    invoke<void>("save_log_export", { path, content }),
+  changeVaultPassword: (oldPassword: string, newPassword: string) =>
+    invoke<void>("change_vault_password", { oldPassword, newPassword }),
+  listCategories: () => invoke<Category[]>("list_categories"),
+  saveCategory: (id: string | undefined, name: string) =>
+    invoke<Category>("save_category", { id: id ?? null, name }),
+  deleteCategory: (id: string) => invoke<void>("delete_category", { id }),
+  snapshotContainerLogs: (sessionId: string, containerId: string, path: string) =>
+    invoke<void>("snapshot_container_logs", { sessionId, containerId, path }),
 };
 
 export interface RemoteCmdResult {

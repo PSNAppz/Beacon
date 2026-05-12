@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, errorMessage, Session, SshTestResult } from "../lib/ipc";
 import { useApp } from "../lib/store";
@@ -7,9 +7,32 @@ import { Button, Toast } from "../components/ui";
 
 export function HomePage() {
   const sessions = useApp((s) => s.sessions);
+  const categories = useApp((s) => s.categories);
   const loading = useApp((s) => s.loadingSessions);
   const removeLocal = useApp((s) => s.removeSessionLocal);
   const refresh = useApp((s) => s.refreshSessions);
+
+  // Group sessions by category. Uncategorised go last.
+  const groups = useMemo(() => {
+    const result: { label: string | null; sessions: Session[] }[] = [];
+    const byCat = new Map<string | null, Session[]>();
+    for (const s of sessions) {
+      const key = s.category_id ?? null;
+      if (!byCat.has(key)) byCat.set(key, []);
+      byCat.get(key)!.push(s);
+    }
+    // Categorised groups first, sorted by category name
+    for (const cat of categories) {
+      const ss = byCat.get(cat.id);
+      if (ss && ss.length > 0) result.push({ label: cat.name, sessions: ss });
+    }
+    // Uncategorised last
+    const uncategorised = byCat.get(null) ?? [];
+    if (uncategorised.length > 0) {
+      result.push({ label: categories.length > 0 ? "Uncategorised" : null, sessions: uncategorised });
+    }
+    return result;
+  }, [sessions, categories]);
 
   const [wizardOpen, setWizardOpen] = useState(false);
   const [editing, setEditing] = useState<Session | null>(null);
@@ -60,8 +83,7 @@ export function HomePage() {
           <Button variant="primary" onClick={openNew}>+ New session</Button>
         </div>
 
-        <section>
-          <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted">Hosts</h2>
+        <section className="space-y-6">
           {loading && sessions.length === 0 ? (
             <div className="rounded-xl border border-border bg-surface p-8 text-center text-sm text-muted">Loading…</div>
           ) : sessions.length === 0 ? (
@@ -70,24 +92,39 @@ export function HomePage() {
               <Button variant="primary" onClick={openNew} className="mt-4">+ Add your first session</Button>
             </div>
           ) : (
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {sessions.map((s) => (
-                <SessionTile
-                  key={s.id}
-                  session={s}
-                  busy={busyId === s.id}
-                  onTest={() => onTest(s)}
-                  onEdit={() => openEdit(s)}
-                  onDelete={() => onDelete(s)}
-                />
+            <>
+              {groups.map((group, gi) => (
+                <div key={group.label ?? "__none__"}>
+                  {group.label && (
+                    <div className="mb-3 flex items-center gap-3">
+                      <h2 className="text-xs font-semibold uppercase tracking-wider text-muted">{group.label}</h2>
+                      <hr className="flex-1 border-border" />
+                    </div>
+                  )}
+                  {!group.label && gi === 0 && (
+                    <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted">Hosts</h2>
+                  )}
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                    {group.sessions.map((s) => (
+                      <SessionTile
+                        key={s.id}
+                        session={s}
+                        busy={busyId === s.id}
+                        onTest={() => onTest(s)}
+                        onEdit={() => openEdit(s)}
+                        onDelete={() => onDelete(s)}
+                      />
+                    ))}
+                  </div>
+                </div>
               ))}
               <button
                 onClick={openNew}
-                className="flex min-h-[140px] items-center justify-center rounded-xl border border-dashed border-border text-sm text-muted hover:border-accent/40 hover:text-accent"
+                className="flex min-h-[140px] w-full items-center justify-center rounded-xl border border-dashed border-border text-sm text-muted hover:border-accent/40 hover:text-accent"
               >
                 + Add session
               </button>
-            </div>
+            </>
           )}
         </section>
       </div>

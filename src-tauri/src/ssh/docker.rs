@@ -149,7 +149,7 @@ pub async fn list_containers(
     Ok(out)
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LogLine {
     pub ts: Option<String>,
     pub text: String,
@@ -250,9 +250,9 @@ pub async fn run_remote_command(
     let mut stderr = Vec::new();
     let mut exit: Option<u32> = None;
     let mut truncated = false;
-    while let Some(msg) = ch.wait().await {
-        match msg {
-            ChannelMsg::Data { ref data } => {
+    loop {
+        match ch.wait().await {
+            Some(ChannelMsg::Data { ref data }) => {
                 if stdout.len() < REMOTE_OUTPUT_CAP {
                     stdout.extend_from_slice(data);
                     if stdout.len() > REMOTE_OUTPUT_CAP { truncated = true; }
@@ -260,7 +260,7 @@ pub async fn run_remote_command(
                     truncated = true;
                 }
             }
-            ChannelMsg::ExtendedData { ref data, .. } => {
+            Some(ChannelMsg::ExtendedData { ref data, .. }) => {
                 if stderr.len() < REMOTE_OUTPUT_CAP {
                     stderr.extend_from_slice(data);
                     if stderr.len() > REMOTE_OUTPUT_CAP { truncated = true; }
@@ -268,8 +268,10 @@ pub async fn run_remote_command(
                     truncated = true;
                 }
             }
-            ChannelMsg::ExitStatus { exit_status } => exit = Some(exit_status),
-            ChannelMsg::Eof | ChannelMsg::Close => break,
+            Some(ChannelMsg::ExitStatus { exit_status }) => exit = Some(exit_status),
+            // Eof signals end of data but ExitStatus may still follow — keep reading.
+            Some(ChannelMsg::Eof) => {}
+            Some(ChannelMsg::Close) | None => break,
             _ => {}
         }
     }
@@ -378,4 +380,88 @@ pub async fn start_log_stream(
 
     manager.register_stream(stream_id.clone(), task);
     Ok(stream_id)
+}
+
+// ─── Docker stats ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ContainerStats {
+    pub id: String,
+    pub name: String,
+    pub cpu_perc: String,
+    pub mem_usage: String,
+    pub mem_perc: String,
+    pub net_io: String,
+    pub block_io: String,
+    pub pids: String,
+}
+
+#[derive(Deserialize)]
+struct DockerStatsRow {
+    #[serde(rename = "ID", default)]
+    id: String,
+    #[serde(rename = "Name", default)]
+    name: String,
+    #[serde(rename = "CPUPerc", default)]
+    cpu_perc: String,
+    #[serde(rename = "MemUsage", default)]
+    mem_usage: String,
+    #[serde(rename = "MemPerc", default)]
+    mem_perc: String,
+    #[serde(rename = "NetIO", default)]
+    net_io: String,
+    #[serde(rename = "BlockIO", default)]
+    block_io: String,
+    #[serde(rename = "PIDs", default)]
+    pids: String,
+}
+
+/// Poll `docker stats --no-stream` once and return stats for every running
+/// container. Takes ~1 second because Docker needs a measurement window for CPU.
+pub async fn poll_docker_stats(
+    manager: &SessionManager,
+    session_id: &str,
+) -> AppResult<Vec<ContainerStats>> {
+    let conn = manager.require(session_id)?;
+    let mut ch = conn
+        .handle
+        .channel_open_session()
+        .await
+        .map_err(|e| AppError::Ssh(format!("open channel: {e}")))?;
+    let inner = "docker stats --no-stream --format '{{json .}}'";
+    let cmd = wrap_command(inner, conn.use_sudo);
+    ch.exec(true, cmd.as_str())
+        .await
+        .map_err(|e| AppError::Ssh(format!("exec docker stats: {e}")))?;
+
+    let mut stdout = Vec::new();
+    while let Some(msg) = ch.wait().await {
+        match msg {
+            ChannelMsg::Data { ref data } => stdout.extend_from_slice(data),
+            ChannelMsg::Eof | ChannelMsg::Close => break,
+            _ => {}
+        }
+    }
+
+    let text = String::from_utf8_lossy(&stdout);
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(row) = serde_json::from_str::<DockerStatsRow>(line) {
+            out.push(ContainerStats {
+                id: row.id,
+                name: row.name,
+                cpu_perc: row.cpu_perc,
+                mem_usage: row.mem_usage,
+                mem_perc: row.mem_perc,
+                net_io: row.net_io,
+                block_io: row.block_io,
+                pids: row.pids,
+            });
+        }
+    }
+    Ok(out)
 }

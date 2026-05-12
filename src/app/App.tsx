@@ -1,6 +1,8 @@
 import { useEffect } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { useApp } from "../lib/store";
+import { useToasts } from "../lib/toastStore";
+import { Toast } from "../components/ui";
 import { LockScreen } from "./LockScreen";
 
 export function App() {
@@ -38,6 +40,19 @@ export function App() {
       <main className="min-h-0 flex-1 overflow-hidden">
         <Outlet />
       </main>
+      <ToastStack />
+    </div>
+  );
+}
+
+function ToastStack() {
+  const { toasts, dismiss } = useToasts();
+  if (toasts.length === 0) return null;
+  return (
+    <div className="fixed bottom-5 right-5 z-50 flex flex-col gap-2">
+      {toasts.map((t) => (
+        <Toast key={t.id} kind={t.kind} message={t.message} onDismiss={() => dismiss(t.id)} />
+      ))}
     </div>
   );
 }

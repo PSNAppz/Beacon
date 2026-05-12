@@ -1,3 +1,4 @@
+mod archive;
 mod commands;
 mod crypto;
 mod error;
@@ -16,6 +17,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(VaultState::new())
         .manage(Arc::new(SessionManager::new()))
+        .manage(Arc::new(archive::ArchiveState::new()))
         .invoke_handler(tauri::generate_handler![
             commands::vault_is_initialized,
             commands::vault_is_unlocked,
@@ -33,6 +35,15 @@ pub fn run() {
             commands::start_log_stream,
             commands::stop_log_stream,
             commands::run_remote_command,
+            commands::poll_docker_stats,
+            commands::archive_log_batch,
+            commands::get_archived_logs,
+            commands::save_log_export,
+            commands::list_categories,
+            commands::save_category,
+            commands::delete_category,
+            commands::snapshot_container_logs,
+            commands::change_vault_password,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

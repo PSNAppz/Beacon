@@ -10,6 +10,7 @@ use russh_keys::key::PublicKey;
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::process::Child;
 
 pub struct AcceptAllHandler;
 
@@ -84,13 +85,52 @@ pub async fn authenticate(
     Ok(())
 }
 
+/// Unified result from `dial()`.
+pub struct DialResult {
+    pub handle: Handle<AcceptAllHandler>,
+    pub jump: Option<Handle<AcceptAllHandler>>,
+    /// Kept alive to hold the SSM tunnel open; kill on disconnect.
+    pub ssm_child: Option<Child>,
+}
+
+
+/// Connect via AWS SSM Session Manager — native SDK, no CLI required.
+/// Calls `ssm:StartSession`, opens a WebSocket datachannel, and uses it as
+/// the SSH transport so no public IP or open port 22 is needed on the instance.
+async fn dial_ssm(vault: &Vault, session: &Session) -> AppResult<DialResult> {
+    let instance_id = session.ssm_instance_id.as_deref()
+        .ok_or_else(|| AppError::Ssh("SSM instance ID is required".into()))?;
+    let region = session.aws_region.as_deref()
+        .ok_or_else(|| AppError::Ssh("AWS region is required for SSM sessions".into()))?;
+
+    let aws = crate::storage::sessions::read_aws_secret(vault, &session.id)?;
+
+    let stream = crate::ssh::ssm_channel::open_ssm_stream(
+        region,
+        instance_id,
+        session.port,
+        session.aws_access_key_id.as_deref(),
+        aws.secret_access_key.as_deref(),
+    )
+    .await?;
+
+    let mut handle = russh::client::connect_stream(cfg(), stream, AcceptAllHandler)
+        .await
+        .map_err(|e| AppError::Ssh(format!("SSH over SSM failed: {e}")))?;
+
+    let secret = crate::storage::sessions::read_secret(vault, &session.id)?;
+    authenticate(&mut handle, session, &secret).await?;
+
+    Ok(DialResult { handle, jump: None, ssm_child: None })
+}
+
 /// Establish a connected, authenticated handle to `session`, transparently
-/// forwarding through `jump_session_id` if set. Returns the target handle and
-/// the (optional) jump handle the caller must keep alive for the tunnel.
-pub async fn dial(
-    vault: &Vault,
-    session: &Session,
-) -> AppResult<(Handle<AcceptAllHandler>, Option<Handle<AcceptAllHandler>>)> {
+/// forwarding through SSM or `jump_session_id` if configured.
+pub async fn dial(vault: &Vault, session: &Session) -> AppResult<DialResult> {
+    if session.use_ssm {
+        return dial_ssm(vault, session).await;
+    }
+
     let secret = crate::storage::sessions::read_secret(vault, &session.id)?;
     let (mut handle, jump_handle) = if let Some(jump_id) = &session.jump_session_id {
         let jump = crate::storage::sessions::get(vault, jump_id)?;
@@ -111,7 +151,7 @@ pub async fn dial(
         (open_handle(&session.host, session.port).await?, None)
     };
     authenticate(&mut handle, session, &secret).await?;
-    Ok((handle, jump_handle))
+    Ok(DialResult { handle, jump: jump_handle, ssm_child: None })
 }
 
 pub async fn exec_capture(
@@ -142,7 +182,8 @@ pub async fn exec_capture(
 /// One-shot connect, run `whoami && uname -a`, disconnect.
 pub async fn test_session(vault: &Vault, session_id: &str) -> AppResult<SshTestResult> {
     let session = crate::storage::sessions::get(vault, session_id)?;
-    let (mut handle, _jump) = dial(vault, &session).await?;
+    let r = dial(vault, &session).await?;
+    let mut handle = r.handle;
     let user = exec_capture(&mut handle, "whoami").await.ok();
     let uname = exec_capture(&mut handle, "uname -a").await.ok();
     let _ = handle.disconnect(Disconnect::ByApplication, "bye", "en").await;

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { api, errorMessage, type Container } from "./ipc";
+import { toast } from "./toastStore";
 
 export type ConnState = "idle" | "connecting" | "connected" | "error";
 
@@ -12,6 +13,7 @@ export interface Tab {
 }
 
 const TABS_KEY = "beacon:tabs:v1";
+const MAX_BACKOFF_MS = 60_000;
 
 function saveTabs(tabs: Tab[]) {
   try { localStorage.setItem(TABS_KEY, JSON.stringify(tabs)); } catch {}
@@ -24,9 +26,34 @@ export function loadSavedTabs(): Tab[] {
   } catch { return []; }
 }
 
+// Reconnect timers live outside the store — timers aren't serialisable state.
+const reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function scheduleReconnect(sessionId: string, attempt: number) {
+  clearTimeout(reconnectTimers.get(sessionId));
+  const delay = Math.min(2_000 * Math.pow(2, attempt), MAX_BACKOFF_MS);
+  reconnectTimers.set(
+    sessionId,
+    setTimeout(() => {
+      reconnectTimers.delete(sessionId);
+      const { connect, tabs } = useWorkspace.getState();
+      // Only retry if there are still open tabs for this session.
+      if (tabs.some((t) => t.sessionId === sessionId)) {
+        connect(sessionId);
+      }
+    }, delay),
+  );
+}
+
+function cancelReconnect(sessionId: string) {
+  clearTimeout(reconnectTimers.get(sessionId));
+  reconnectTimers.delete(sessionId);
+}
+
 export interface WorkspaceStore {
   connState: Record<string, ConnState>;
   connError: Record<string, string>;
+  reconnectAttempts: Record<string, number>;
   containers: Record<string, Container[]>;
   containersLoading: Record<string, boolean>;
   containersError: Record<string, string | null>;
@@ -35,18 +62,25 @@ export interface WorkspaceStore {
   activeTabId: string | null;
   splitTabId: string | null;
 
+  /** True once the saved-tabs restore has run. Persists across remounts so the
+   *  restore logic doesn't fire again when the user navigates back to Workspace. */
+  storageRestored: boolean;
+
   connect: (sessionId: string) => Promise<void>;
   disconnect: (sessionId: string) => Promise<void>;
+  disconnectAll: () => Promise<void>;
   refreshContainers: (sessionId: string) => Promise<void>;
   openTab: (sessionId: string, container: Container) => void;
   closeTab: (tabId: string) => void;
   setActiveTab: (tabId: string) => void;
   setSplitTab: (tabId: string | null) => void;
+  markStorageRestored: () => void;
 }
 
 export const useWorkspace = create<WorkspaceStore>((set, get) => ({
   connState: {},
   connError: {},
+  reconnectAttempts: {},
   containers: {},
   containersLoading: {},
   containersError: {},
@@ -55,23 +89,39 @@ export const useWorkspace = create<WorkspaceStore>((set, get) => ({
   activeTabId: null,
   splitTabId: null,
 
+  storageRestored: false,
+
+  markStorageRestored() {
+    set({ storageRestored: true });
+  },
+
   async connect(sessionId) {
     const cur = get().connState[sessionId];
     if (cur === "connected" || cur === "connecting") return;
     set((s) => ({ connState: { ...s.connState, [sessionId]: "connecting" } }));
     try {
       await api.connectSession(sessionId);
-      set((s) => ({ connState: { ...s.connState, [sessionId]: "connected" } }));
+      set((s) => ({
+        connState: { ...s.connState, [sessionId]: "connected" },
+        reconnectAttempts: { ...s.reconnectAttempts, [sessionId]: 0 },
+      }));
       await get().refreshContainers(sessionId);
     } catch (e) {
+      const attempt = get().reconnectAttempts[sessionId] ?? 0;
+      const msg = errorMessage(e);
       set((s) => ({
         connState: { ...s.connState, [sessionId]: "error" },
-        connError: { ...s.connError, [sessionId]: errorMessage(e) },
+        connError: { ...s.connError, [sessionId]: msg },
+        reconnectAttempts: { ...s.reconnectAttempts, [sessionId]: attempt + 1 },
       }));
+      // Show a toast only on the first failure so the user knows something went wrong.
+      if (attempt === 0) toast("error", `Connection failed: ${msg}`);
+      scheduleReconnect(sessionId, attempt);
     }
   },
 
   async disconnect(sessionId) {
+    cancelReconnect(sessionId);
     await api.disconnectSession(sessionId).catch(() => {});
     set((s) => {
       const tabs = s.tabs.filter((t) => t.sessionId !== sessionId);
@@ -86,11 +136,26 @@ export const useWorkspace = create<WorkspaceStore>((set, get) => ({
       saveTabs(tabs);
       return {
         connState: { ...s.connState, [sessionId]: "idle" },
+        reconnectAttempts: { ...s.reconnectAttempts, [sessionId]: 0 },
         containers: { ...s.containers, [sessionId]: [] },
         tabs,
         activeTabId,
         splitTabId,
       };
+    });
+  },
+
+  async disconnectAll() {
+    const { connState } = get();
+    const ids = Object.keys(connState).filter(
+      (id) => connState[id] === "connected" || connState[id] === "connecting",
+    );
+    ids.forEach((id) => cancelReconnect(id));
+    await Promise.all(ids.map((id) => api.disconnectSession(id).catch(() => {})));
+    set((s) => {
+      const next: Record<string, ConnState> = {};
+      Object.keys(s.connState).forEach((id) => { next[id] = "idle"; });
+      return { connState: next, containers: {}, reconnectAttempts: {} };
     });
   },
 
@@ -118,7 +183,6 @@ export const useWorkspace = create<WorkspaceStore>((set, get) => ({
       (t) => t.sessionId === sessionId && t.containerId === container.id,
     );
     if (existing) {
-      // If it's in the split pane, swap it to primary.
       const { splitTabId, activeTabId } = get();
       if (existing.id === splitTabId) {
         set({ activeTabId: existing.id, splitTabId: activeTabId });
@@ -148,7 +212,6 @@ export const useWorkspace = create<WorkspaceStore>((set, get) => ({
       let splitTabId = s.splitTabId === tabId ? null : s.splitTabId;
       let activeTabId = s.activeTabId;
       if (activeTabId === tabId) {
-        // Prefer the tab to the left, else right, else split, else null.
         activeTabId =
           tabs[Math.max(0, idx - 1)]?.id ??
           splitTabId ??
@@ -163,7 +226,6 @@ export const useWorkspace = create<WorkspaceStore>((set, get) => ({
   setActiveTab(tabId) {
     const { splitTabId, activeTabId } = get();
     if (tabId === splitTabId) {
-      // Clicking the split tab promotes it to primary and demotes current primary to split.
       set({ activeTabId: tabId, splitTabId: activeTabId });
     } else {
       set({ activeTabId: tabId });
@@ -172,7 +234,7 @@ export const useWorkspace = create<WorkspaceStore>((set, get) => ({
 
   setSplitTab(tabId) {
     const { activeTabId } = get();
-    if (tabId === activeTabId) return; // can't split to the same tab
+    if (tabId === activeTabId) return;
     set({ splitTabId: tabId });
   },
 }));

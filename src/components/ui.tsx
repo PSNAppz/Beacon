@@ -41,7 +41,7 @@ export function Select({ className = "", children, ...props }: SelectHTMLAttribu
   );
 }
 
-export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+export function Field({ label, hint, children }: { label: string; hint?: ReactNode; children: ReactNode }) {
   return (
     <label className="block space-y-1.5">
       <div className="flex items-baseline justify-between">
@@ -90,11 +90,29 @@ export function Modal({
   );
 }
 
-export function Toast({ kind, message }: { kind: "ok" | "error" | "info"; message: string }) {
-  const tone = kind === "ok" ? "border-ok/40 text-ok" : kind === "error" ? "border-danger/40 text-danger" : "border-border text-muted";
+export function Toast({
+  kind,
+  message,
+  onDismiss,
+}: {
+  kind: "ok" | "error" | "info";
+  message: string;
+  onDismiss?: () => void;
+}) {
+  const tone =
+    kind === "ok"
+      ? "border-ok/40 text-ok"
+      : kind === "error"
+      ? "border-danger/40 text-danger"
+      : "border-border text-muted";
   return (
-    <div className={`fixed bottom-5 right-5 z-50 rounded-lg border ${tone} bg-surface px-4 py-2 text-sm shadow-lg`}>
-      {message}
+    <div className={`flex items-center gap-3 rounded-lg border ${tone} bg-surface px-4 py-2 text-sm shadow-lg`}>
+      <span className="flex-1">{message}</span>
+      {onDismiss && (
+        <button onClick={onDismiss} className="shrink-0 text-muted hover:text-fg" aria-label="Dismiss">
+          ✕
+        </button>
+      )}
     </div>
   );
 }

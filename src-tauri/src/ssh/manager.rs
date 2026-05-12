@@ -10,12 +10,14 @@ use russh::client::Handle;
 use russh::Disconnect;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::process::Child;
 use tokio::task::JoinHandle;
 
 pub struct ConnectedSession {
     pub handle: Handle<AcceptAllHandler>,
     pub use_sudo: bool,
     _jump: Option<Handle<AcceptAllHandler>>,
+    _ssm_child: Option<Child>,
 }
 
 pub struct SessionManager {
@@ -36,8 +38,13 @@ impl SessionManager {
             return Ok(());
         }
         let session = crate::storage::sessions::get(vault, session_id)?;
-        let (handle, jump) = dial(vault, &session).await?;
-        let entry = Arc::new(ConnectedSession { handle, use_sudo: session.use_sudo, _jump: jump });
+        let r = dial(vault, &session).await?;
+        let entry = Arc::new(ConnectedSession {
+            handle: r.handle,
+            use_sudo: session.use_sudo,
+            _jump: r.jump,
+            _ssm_child: r.ssm_child,
+        });
         self.sessions.lock().insert(session_id.to_string(), entry);
         crate::storage::sessions::touch_last_connected(vault, session_id)?;
         Ok(())
@@ -54,14 +61,14 @@ impl SessionManager {
     pub async fn disconnect(&self, session_id: &str) -> AppResult<()> {
         let entry = self.sessions.lock().remove(session_id);
         if let Some(entry) = entry {
-            // Stop any streams that belong to this session — we don't track
-            // their session linkage here, so callers should stop streams
-            // explicitly. Abort all if the session is fully going away.
-            if let Some(conn) = Arc::into_inner(entry) {
+            if let Some(mut conn) = Arc::into_inner(entry) {
                 let _ = conn
                     .handle
                     .disconnect(Disconnect::ByApplication, "bye", "en")
                     .await;
+                if let Some(ref mut child) = conn._ssm_child {
+                    let _ = child.start_kill();
+                }
             }
         }
         Ok(())

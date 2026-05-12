@@ -1,7 +1,8 @@
+use crate::archive::ArchiveState;
 use crate::error::{AppError, AppResult};
 use crate::ssh::{self, SessionManager, SshTestResult};
-use crate::ssh::docker::{Container, RemoteCmdResult};
-use crate::storage::{self, Session, SessionInput, Vault, VaultState};
+use crate::ssh::docker::{Container, ContainerStats, LogLine, RemoteCmdResult};
+use crate::storage::{self, Category, Session, SessionInput, Vault, VaultState};
 use std::sync::Arc;
 use tauri::State;
 
@@ -135,4 +136,95 @@ pub fn stop_log_stream(
 ) -> AppResult<()> {
     manager.stop_stream(&stream_id);
     Ok(())
+}
+
+// ─── Docker stats ─────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn poll_docker_stats(
+    manager: State<'_, Arc<SessionManager>>,
+    session_id: String,
+) -> AppResult<Vec<ContainerStats>> {
+    ssh::docker::poll_docker_stats(&manager, &session_id).await
+}
+
+// ─── Archive ──────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn archive_log_batch(
+    archive: State<'_, Arc<ArchiveState>>,
+    session_id: String,
+    container_id: String,
+    lines: Vec<LogLine>,
+) -> AppResult<()> {
+    archive.with_conn(|conn| crate::archive::write_lines(conn, &session_id, &container_id, &lines))
+}
+
+#[tauri::command]
+pub fn get_archived_logs(
+    archive: State<'_, Arc<ArchiveState>>,
+    session_id: String,
+    container_id: String,
+    limit: Option<i64>,
+) -> AppResult<Vec<LogLine>> {
+    archive.with_conn(|conn| {
+        crate::archive::read_lines(conn, &session_id, &container_id, limit.unwrap_or(5_000))
+    })
+}
+
+// ─── Export ───────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn save_log_export(path: String, content: String) -> AppResult<()> {
+    std::fs::write(&path, content)?;
+    Ok(())
+}
+
+// ─── Categories ───────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn list_categories(state: State<'_, VaultState>) -> AppResult<Vec<Category>> {
+    with_vault(&state, |v| storage::categories::list(v))
+}
+
+#[tauri::command]
+pub fn save_category(state: State<'_, VaultState>, id: Option<String>, name: String) -> AppResult<Category> {
+    with_vault(&state, |v| storage::categories::upsert(v, id, name))
+}
+
+#[tauri::command]
+pub fn delete_category(state: State<'_, VaultState>, id: String) -> AppResult<()> {
+    with_vault(&state, |v| storage::categories::delete(v, &id))
+}
+
+// ─── Log snapshot ─────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn snapshot_container_logs(
+    archive: State<'_, Arc<ArchiveState>>,
+    session_id: String,
+    container_id: String,
+    path: String,
+) -> AppResult<()> {
+    let lines = archive.with_conn(|conn| {
+        crate::archive::read_lines(conn, &session_id, &container_id, 50_000)
+    })?;
+    let content: String = lines
+        .iter()
+        .map(|l| format!("{} {}\n", l.ts.as_deref().unwrap_or(""), l.text))
+        .collect();
+    std::fs::write(&path, content).map_err(|e| AppError::Other(e.to_string()))
+}
+
+// ─── Vault password change ─────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn change_vault_password(
+    state: State<'_, VaultState>,
+    old_password: String,
+    new_password: String,
+) -> AppResult<()> {
+    let mut guard = state.inner.lock();
+    let v = guard.as_mut().ok_or(AppError::Locked)?;
+    v.change_password(&old_password, &new_password)
 }
