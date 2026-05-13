@@ -20,9 +20,21 @@ pub struct ConnectedSession {
     _ssm_child: Option<Child>,
 }
 
+/// Sender half of a per-step stdin pipe used by the upgrade flow runner.
+/// Wraps an `mpsc` so `send_upgrade_input` can push bytes without holding a
+/// channel lock.
+pub type StdinTx = tokio::sync::mpsc::UnboundedSender<Vec<u8>>;
+pub type StdinRx = tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>;
+
+pub fn stdin_pipe() -> (StdinTx, StdinRx) {
+    tokio::sync::mpsc::unbounded_channel()
+}
+
 pub struct SessionManager {
     sessions: Mutex<HashMap<String, Arc<ConnectedSession>>>,
     streams: Mutex<HashMap<String, JoinHandle<()>>>,
+    /// Maps upgrade run_id → stdin sender for the currently-running step.
+    upgrade_inputs: Mutex<HashMap<String, StdinTx>>,
 }
 
 impl SessionManager {
@@ -30,6 +42,7 @@ impl SessionManager {
         Self {
             sessions: Mutex::new(HashMap::new()),
             streams: Mutex::new(HashMap::new()),
+            upgrade_inputs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -89,6 +102,37 @@ impl SessionManager {
         } else {
             false
         }
+    }
+
+    // ─── Upgrade stdin registry ───────────────────────────────────────────────
+
+    /// Register a stdin sender for an upgrade run so `send_upgrade_input` can
+    /// reach the currently-running PTY step across Tauri command boundaries.
+    pub fn register_upgrade_stdin(&self, run_id: String, tx: StdinTx) {
+        self.upgrade_inputs.lock().insert(run_id, tx);
+    }
+
+    pub fn unregister_upgrade_stdin(&self, run_id: &str) {
+        self.upgrade_inputs.lock().remove(run_id);
+    }
+
+    /// Forward `text` (+ `\n` if not already present) to the active upgrade
+    /// step's stdin.  Returns an error if no step is running for this run_id.
+    pub fn send_upgrade_input(&self, run_id: &str, text: &str) -> AppResult<()> {
+        let tx = self
+            .upgrade_inputs
+            .lock()
+            .get(run_id)
+            .cloned()
+            .ok_or_else(|| {
+                AppError::Other(format!("no active upgrade step for run_id={run_id}"))
+            })?;
+        let mut bytes = text.as_bytes().to_vec();
+        if !bytes.ends_with(b"\n") {
+            bytes.push(b'\n');
+        }
+        tx.send(bytes)
+            .map_err(|_| AppError::Ssh("upgrade: stdin channel closed".into()))
     }
 }
 

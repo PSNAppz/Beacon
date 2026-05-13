@@ -7,12 +7,14 @@ import {
   onDiagCommand,
   onLogBatch,
   onLogEnd,
+  upgradeApi,
   type Container,
   type ContainerStats,
   type DiagCommand,
   type LogLine,
   type RemoteCmdResult,
   type Session,
+  type UpgradeFlow,
 } from "../lib/ipc";
 import { useApp } from "../lib/store";
 import { toast } from "../lib/toastStore";
@@ -30,6 +32,9 @@ import {
 import { Button, Input } from "../components/ui";
 import { CommandPalette } from "./CommandPalette";
 import { RulesModal } from "../features/rules/RulesModal";
+import { UpgradeFlowWizard } from "../features/upgrades/UpgradeFlowWizard";
+import { UpgradeConfirmDialog } from "../features/upgrades/UpgradeConfirmDialog";
+import { UpgradeRunPanel } from "../features/upgrades/UpgradeRunPanel";
 
 const MAX_LINES = 10_000;
 const ROW_HEIGHT = 18;
@@ -44,6 +49,60 @@ export function WorkspacePage() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [consoleSessionId, setConsoleSessionId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  // ── Upgrade flow state ────────────────────────────────────────────────────
+  // upgradeFlows: session_id -> UpgradeFlow | null
+  const [upgradeFlows, setUpgradeFlows] = useState<Record<string, UpgradeFlow | null>>({});
+
+  // Wizard: configure / edit a flow
+  const [wizardTarget, setWizardTarget] = useState<{
+    sessionId: string;
+    existing: UpgradeFlow | null;
+  } | null>(null);
+
+  // Confirm: pre-flight dialog before running
+  const [confirmTarget, setConfirmTarget] = useState<{
+    sessionId: string;
+    sessionName: string;
+    flow: UpgradeFlow;
+  } | null>(null);
+
+  // Run panel
+  const [runTarget, setRunTarget] = useState<{
+    sessionId: string;
+    steps: string[];
+    runId: string;
+  } | null>(null);
+
+  // Load flow when a session connects (one flow per server)
+  useEffect(() => {
+    const connected = Object.entries(ws.connState)
+      .filter(([, s]) => s === "connected")
+      .map(([id]) => id);
+    connected.forEach((sid) => {
+      if (!(sid in upgradeFlows)) {
+        upgradeApi.getFlow(sid).then((flow) => {
+          setUpgradeFlows((prev) => ({ ...prev, [sid]: flow }));
+        }).catch(() => {});
+      }
+    });
+  }, [ws.connState]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Trigger the upgrade run exactly once when a runTarget is set.
+  // Keeping this in WorkspacePage (not inside UpgradeRunPanel) prevents
+  // re-running when the console panel is toggled off and back on.
+  useEffect(() => {
+    if (!runTarget) return;
+    upgradeApi
+      .runFlow({ sessionId: runTarget.sessionId, steps: runTarget.steps, runId: runTarget.runId })
+      .catch(() => {});
+  }, [runTarget?.runId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function refreshFlow(sessionId: string) {
+    upgradeApi.getFlow(sessionId).then((flow) => {
+      setUpgradeFlows((prev) => ({ ...prev, [sessionId]: flow }));
+    }).catch(() => {});
+  }
 
   // Diff state: tracks whether side-by-side diff mode is on and provides a
   // shared registry for each pane to write/read its filtered lines.
@@ -133,6 +192,13 @@ export function WorkspacePage() {
           sessions={sessions}
           ws={ws}
           consoleSessionId={consoleSessionId}
+          upgradeFlows={upgradeFlows}
+          onOpenWizard={(sessionId, existing) =>
+            setWizardTarget({ sessionId, existing })
+          }
+          onOpenUpgrade={(sessionId, sessionName, flow) =>
+            setConfirmTarget({ sessionId, sessionName, flow })
+          }
           onToggleConsole={(id) =>
             setConsoleSessionId((cur) => (cur === id ? null : id))
           }
@@ -198,11 +264,19 @@ export function WorkspacePage() {
 
         {/* Console strip */}
         {consoleSessionId && consoleConn === "connected" && (
-          <ConsolePane
-            sessionId={consoleSessionId}
-            compact={!!activeTab}
-            onClose={() => setConsoleSessionId(null)}
-          />
+          runTarget && runTarget.sessionId === consoleSessionId
+            ? <UpgradeRunPanel
+                sessionId={runTarget.sessionId}
+                runId={runTarget.runId}
+                steps={runTarget.steps}
+                onClose={() => setRunTarget(null)}
+                onComplete={() => {}}
+              />
+            : <ConsolePane
+                sessionId={consoleSessionId}
+                compact={!!activeTab}
+                onClose={() => setConsoleSessionId(null)}
+              />
         )}
       </div>
 
@@ -211,6 +285,39 @@ export function WorkspacePage() {
           sessions={sessions}
           ws={ws}
           onClose={() => setPaletteOpen(false)}
+        />
+      )}
+
+      {/* ── Upgrade modals ── */}
+      {wizardTarget && (
+        <UpgradeFlowWizard
+          sessionId={wizardTarget.sessionId}
+          sessionName={sessions.find((s) => s.id === wizardTarget.sessionId)?.name ?? ""}
+          existing={wizardTarget.existing}
+          onSave={(flow) => {
+            refreshFlow(flow.session_id);
+            setWizardTarget(null);
+          }}
+          onDelete={() => {
+            refreshFlow(wizardTarget.sessionId);
+            setWizardTarget(null);
+          }}
+          onClose={() => setWizardTarget(null)}
+        />
+      )}
+
+      {confirmTarget && (
+        <UpgradeConfirmDialog
+          sessionName={confirmTarget.sessionName}
+          flow={confirmTarget.flow}
+          onConfirm={(steps) => {
+            const runId = crypto.randomUUID();
+            const sid = confirmTarget.sessionId;
+            setConfirmTarget(null);
+            setConsoleSessionId(sid);
+            setRunTarget({ sessionId: sid, steps, runId });
+          }}
+          onCancel={() => setConfirmTarget(null)}
         />
       )}
     </div>
@@ -223,12 +330,18 @@ function HostTree({
   sessions,
   ws,
   consoleSessionId,
+  upgradeFlows,
+  onOpenWizard,
+  onOpenUpgrade,
   onToggleConsole,
   onCollapse,
 }: {
   sessions: Session[];
   ws: WorkspaceStore;
   consoleSessionId: string | null;
+  upgradeFlows: Record<string, UpgradeFlow | null>;
+  onOpenWizard: (sessionId: string, existing: UpgradeFlow | null) => void;
+  onOpenUpgrade: (sessionId: string, sessionName: string, flow: UpgradeFlow) => void;
   onToggleConsole: (id: string) => void;
   onCollapse: () => void;
 }) {
@@ -315,6 +428,9 @@ function HostTree({
                   onToggle={() => toggle(s.id)}
                   consoleOpen={consoleSessionId === s.id}
                   onToggleConsole={() => onToggleConsole(s.id)}
+                  upgradeFlow={upgradeFlows[s.id] ?? null}
+                  onOpenWizard={onOpenWizard}
+                  onOpenUpgrade={onOpenUpgrade}
                 />
               ))}
             </div>
@@ -336,6 +452,9 @@ function SessionNode({
   onToggle,
   consoleOpen,
   onToggleConsole,
+  upgradeFlow,
+  onOpenWizard,
+  onOpenUpgrade,
 }: {
   session: Session;
   ws: WorkspaceStore;
@@ -343,6 +462,9 @@ function SessionNode({
   onToggle: () => void;
   consoleOpen: boolean;
   onToggleConsole: () => void;
+  upgradeFlow: UpgradeFlow | null;
+  onOpenWizard: (sessionId: string, existing: UpgradeFlow | null) => void;
+  onOpenUpgrade: (sessionId: string, sessionName: string, flow: UpgradeFlow) => void;
 }) {
   const state = ws.connState[session.id] ?? "idle";
   const containers = ws.containers[session.id] ?? [];
@@ -375,6 +497,24 @@ function SessionNode({
           {session.name}
         </button>
 
+        {state === "connected" && upgradeFlow && (
+          <button
+            onClick={() => onOpenUpgrade(session.id, session.name, upgradeFlow)}
+            title={`Run upgrade: ${upgradeFlow.label ?? session.name}`}
+            className="rounded px-1 py-0.5 text-[10px] font-medium text-indigo-400 hover:bg-indigo-500/15 transition-colors"
+          >
+            🚀
+          </button>
+        )}
+        {state === "connected" && (
+          <button
+            onClick={() => onOpenWizard(session.id, upgradeFlow)}
+            title={upgradeFlow ? "Edit upgrade flow" : "Set up upgrade flow"}
+            className="rounded p-0.5 text-[10px] text-muted hover:text-fg"
+          >
+            ⚙
+          </button>
+        )}
         {state === "connected" && (
           <button
             onClick={onToggleConsole}
@@ -446,9 +586,7 @@ function SessionNode({
                 <button
                   onClick={() => ws.openTab(session.id, c)}
                   className={`w-full rounded px-2 py-1 text-left transition-colors ${
-                    isActive
-                      ? "bg-surface-2 text-fg"
-                      : "text-muted hover:bg-surface-2 hover:text-fg"
+                    isActive ? "bg-surface-2 text-fg" : "text-muted hover:bg-surface-2 hover:text-fg"
                   }`}
                 >
                   <div className="flex items-center gap-1.5 pr-5">
@@ -474,10 +612,13 @@ function SnapshotButton({
   sessionId,
   containerId,
   containerName,
+  inline = false,
 }: {
   sessionId: string;
   containerId: string;
   containerName: string;
+  /** When true, renders as a plain inline button instead of absolute-positioned */
+  inline?: boolean;
 }) {
   const [saving, setSaving] = useState(false);
 
@@ -506,7 +647,11 @@ function SnapshotButton({
       onClick={(e) => { e.stopPropagation(); handleSnapshot(); }}
       disabled={saving}
       title="Snapshot archived logs to file"
-      className="absolute right-1 top-1 hidden rounded p-0.5 text-[10px] text-muted hover:text-accent group-hover/container:block disabled:opacity-40"
+      className={
+        inline
+          ? "rounded px-1.5 py-0.5 text-[10px] text-white/20 hover:text-white/50 transition-colors disabled:opacity-40"
+          : "absolute right-1 top-1 hidden rounded p-0.5 text-[10px] text-muted hover:text-accent group-hover/container:block disabled:opacity-40"
+      }
     >
       {saving ? "…" : "⬇"}
     </button>

@@ -26,6 +26,8 @@ struct BcnxPayload {
     exported_at: i64,
     categories: Vec<CategoryRow>,
     sessions: Vec<ExportSession>,
+    #[serde(default)]
+    upgrade_flows: Vec<ExportUpgradeFlow>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -56,6 +58,15 @@ struct ExportSession {
     aws_profile: Option<String>,
     aws_access_key_id: Option<String>,
     aws_secret_access_key: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ExportUpgradeFlow {
+    id: String,
+    session_id: String,
+    label: Option<String>,
+    working_directory: Option<String>,
+    steps: Vec<String>,
 }
 
 // ─── Public preview types (returned to the frontend) ─────────────────────────
@@ -98,7 +109,7 @@ fn build_bcnx(password: &str, payload: &BcnxPayload) -> AppResult<String> {
 fn parse_bcnx(data: &str, password: &str) -> AppResult<BcnxPayload> {
     let file: BcnxFile = serde_json::from_str(data)
         .map_err(|_| AppError::Other("not a valid .bcnx file".into()))?;
-    if file.version != 1 {
+    if file.version != 1 && file.version != 2 {
         return Err(AppError::Other(format!(
             "unsupported .bcnx version {}",
             file.version
@@ -162,11 +173,25 @@ pub fn export_sessions(vault: &Vault, ids: &[String], password: &str, path: &str
     // Fetch referenced categories
     let categories = fetch_categories_by_ids(vault, &cat_ids)?;
 
+    // Fetch upgrade flows for the exported sessions
+    let raw_flows = crate::storage::upgrades::list_for_sessions(vault, ids)?;
+    let upgrade_flows: Vec<ExportUpgradeFlow> = raw_flows
+        .into_iter()
+        .map(|f| ExportUpgradeFlow {
+            id: f.id,
+            session_id: f.session_id,
+            label: f.label,
+            working_directory: f.working_directory,
+            steps: f.steps,
+        })
+        .collect();
+
     let payload = BcnxPayload {
-        version: 1,
+        version: 2,
         exported_at: now_unix(),
         categories,
         sessions: sessions_out,
+        upgrade_flows,
     };
     let content = build_bcnx(password, &payload)?;
     std::fs::write(path, content)?;
@@ -311,6 +336,37 @@ pub fn import_sessions(
         };
 
         imported.push(crate::storage::sessions::upsert(vault, input)?);
+    }
+
+    // Import upgrade flows — remap session_id using the same conflict logic.
+    // Build a map: file session id -> final vault session id.
+    let mut session_id_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for s in &payload.sessions {
+        if !selected_set.contains(s.id.as_str()) { continue; }
+        let has_same_id = existing_ids.contains(s.id.as_str());
+        let has_same_name = existing_names
+            .get(&s.name.to_lowercase())
+            .map(|eid| eid.as_str() != s.id)
+            .unwrap_or(false);
+        let has_conflict = has_same_id || has_same_name;
+        let final_id = match conflict_strategy {
+            "skip" if has_conflict => continue,
+            "rename" if has_conflict => format!("{}-imported", s.id),
+            _ => s.id.clone(),
+        };
+        session_id_map.insert(s.id.clone(), final_id);
+    }
+    for f in &payload.upgrade_flows {
+        if let Some(vault_session_id) = session_id_map.get(&f.session_id) {
+            let flow_input = crate::storage::upgrades::UpgradeFlowInput {
+                id: Some(f.id.clone()),
+                session_id: vault_session_id.clone(),
+                label: f.label.clone(),
+                working_directory: f.working_directory.clone(),
+                steps: f.steps.clone(),
+            };
+            let _ = crate::storage::upgrades::upsert(vault, flow_input);
+        }
     }
 
     Ok(imported)

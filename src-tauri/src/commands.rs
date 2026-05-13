@@ -263,3 +263,57 @@ pub fn change_vault_password(
     let v = guard.as_mut().ok_or(AppError::Locked)?;
     v.change_password(&old_password, &new_password)
 }
+
+// ─── Upgrade flows ────────────────────────────────────────────────────────────
+
+/// Get the single upgrade flow configured for a session, or null if none.
+#[tauri::command]
+pub fn get_upgrade_flow(
+    state: State<'_, VaultState>,
+    session_id: String,
+) -> AppResult<Option<storage::UpgradeFlow>> {
+    with_vault(&state, |v| storage::upgrades::get_for_session(v, &session_id))
+}
+
+#[tauri::command]
+pub fn save_upgrade_flow(
+    state: State<'_, VaultState>,
+    input: storage::UpgradeFlowInput,
+) -> AppResult<storage::UpgradeFlow> {
+    with_vault(&state, |v| storage::upgrades::upsert(v, input))
+}
+
+/// Delete the upgrade flow for a session.
+#[tauri::command]
+pub fn delete_upgrade_flow(
+    state: State<'_, VaultState>,
+    session_id: String,
+) -> AppResult<()> {
+    with_vault(&state, |v| storage::upgrades::delete(v, &session_id))
+}
+
+/// Trigger an upgrade flow run. Steps are passed directly so the user's
+/// pre-flight edits are used without being persisted back to the DB.
+#[tauri::command]
+pub async fn run_upgrade_flow(
+    app: tauri::AppHandle,
+    manager: State<'_, Arc<SessionManager>>,
+    session_id: String,
+    steps: Vec<String>,
+    run_id: String,
+) -> AppResult<()> {
+    let mgr = manager.inner().clone();
+    ssh::docker::run_upgrade_flow(app, mgr, session_id, steps, run_id).await
+}
+
+/// Send a line of text to the stdin of the currently-running upgrade step.
+#[tauri::command]
+pub fn send_upgrade_input(
+    manager: State<'_, Arc<SessionManager>>,
+    run_id: String,
+    text: String,
+) -> AppResult<()> {
+    manager.send_upgrade_input(&run_id, &text)
+}
+
+

@@ -130,6 +130,31 @@ impl Vault {
             }
         }
 
+        // upgrade_flows table (per-server, not per-container).
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS upgrade_flows (
+                 id                TEXT PRIMARY KEY,
+                 session_id        TEXT NOT NULL UNIQUE,
+                 label             TEXT,
+                 working_directory TEXT,
+                 steps             TEXT NOT NULL DEFAULT '[]',
+                 created_at        INTEGER NOT NULL,
+                 updated_at        INTEGER NOT NULL,
+                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+             );",
+        )?;
+        // Add working_directory to existing installs that predate this column.
+        let has_working_dir: bool = conn
+            .query_row(
+                "SELECT 1 FROM pragma_table_info('upgrade_flows') WHERE name = 'working_directory'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if !has_working_dir {
+            conn.execute("ALTER TABLE upgrade_flows ADD COLUMN working_directory TEXT", [])?;
+        }
+
         Ok(())
     }
 
