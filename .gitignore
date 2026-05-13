@@ -8,3 +8,4 @@ dist-ssr
 
 # Tauri
 src-tauri/target
+*.bcnx
