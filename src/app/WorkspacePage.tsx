@@ -7,6 +7,7 @@ import {
   onDiagCommand,
   onLogBatch,
   onLogEnd,
+  s3Api,
   upgradeApi,
   type Container,
   type ContainerStats,
@@ -44,6 +45,7 @@ const ROW_HEIGHT = 18;
 export function WorkspacePage() {
   const { sessionId: routeSessionId } = useParams<{ sessionId?: string }>();
   const sessions = useApp((s) => s.sessions);
+  const s3Config = useApp((s) => s.s3Config);
   const ws = useWorkspace();
 
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -310,11 +312,36 @@ export function WorkspacePage() {
         <UpgradeConfirmDialog
           sessionName={confirmTarget.sessionName}
           flow={confirmTarget.flow}
-          onConfirm={(steps) => {
+          onConfirm={async (steps) => {
             const runId = crypto.randomUUID();
             const sid = confirmTarget.sessionId;
             setConfirmTarget(null);
             setConsoleSessionId(sid);
+
+            // Back up logs to S3 before the upgrade wipes them
+            if (s3Config) {
+              const containers = ws.containers[sid] ?? [];
+              const running = containers.filter((c) => c.state === "running");
+              if (running.length > 0) {
+                toast("ok", `Backing up ${running.length} container log(s) to S3…`);
+                const results = await Promise.allSettled(
+                  running.map((c) => s3Api.uploadLogs(sid, c.id, c.name))
+                );
+                results.forEach((r, i) => {
+                  if (r.status === "fulfilled") {
+                    toast("ok", `${running[i].name} → ${r.value}`);
+                  } else {
+                    toast("error", `S3 backup failed for ${running[i].name}: ${errorMessage(r.reason)}`);
+                  }
+                });
+                const hadFailures = results.some((r) => r.status === "rejected");
+                if (hadFailures) {
+                  const proceed = confirm("Some S3 log backups failed. Continue with the upgrade anyway?");
+                  if (!proceed) return;
+                }
+              }
+            }
+
             setRunTarget({ sessionId: sid, steps, runId });
           }}
           onCancel={() => setConfirmTarget(null)}
@@ -472,98 +499,203 @@ function SessionNode({
   const error = ws.connError[session.id];
   const containerErr = ws.containersError[session.id];
   const reconnectAttempts = ws.reconnectAttempts[session.id] ?? 0;
+  const s3Config = useApp((s) => s.s3Config);
+  const [serverUploading, setServerUploading] = useState(false);
 
-  const dotColor =
-    state === "connected" ? "text-ok" :
-    state === "connecting" ? "text-warn" :
-    state === "error" ? "text-danger" : "text-muted";
+  async function handleServerS3Upload() {
+    if (!s3Config) return;
+    const running = containers.filter((c) => c.state === "running");
+    if (running.length === 0) {
+      toast("ok", "No running containers to back up.");
+      return;
+    }
+    setServerUploading(true);
+    toast("ok", `Backing up ${running.length} container log(s) for ${session.name}…`);
+    const results = await Promise.allSettled(
+      running.map((c) => s3Api.uploadLogs(session.id, c.id, c.name))
+    );
+    results.forEach((r, i) => {
+      if (r.status === "fulfilled") {
+        toast("ok", `${running[i].name} → ${r.value}`);
+      } else {
+        toast("error", `S3 backup failed for ${running[i].name}: ${errorMessage(r.reason)}`);
+      }
+    });
+    setServerUploading(false);
+  }
+
+  const statusRingColor =
+    state === "connected" ? "bg-ok" :
+    state === "connecting" ? "bg-warn animate-pulse" :
+    state === "error" ? "bg-danger" : "bg-muted/40";
+
+  const isConnected = state === "connected";
+  const isConnecting = state === "connecting";
+  const isIdle = state === "idle";
+  const isError = state === "error";
 
   return (
-    <div>
-      <div className="flex items-center gap-1 px-2 py-1">
-        <button
-          onClick={onToggle}
-          className="flex-none rounded p-0.5 text-[10px] text-muted hover:text-fg"
-          aria-label={expanded ? "Collapse" : "Expand"}
-        >
-          {expanded ? "▾" : "▸"}
-        </button>
-        <span className={`shrink-0 text-[10px] ${dotColor}`}>●</span>
-        <button
-          onClick={onToggle}
-          className="min-w-0 flex-1 truncate text-left text-[13px] font-medium hover:text-fg"
-          title={`${session.username}@${session.host}:${session.port}`}
-        >
-          {session.name}
-        </button>
-
-        {state === "connected" && upgradeFlow && (
+    <div className="mx-1.5 my-0.5">
+      <div
+        className={`rounded-lg border transition-colors ${
+          isConnected
+            ? "border-border/70 bg-surface"
+            : isError
+            ? "border-danger/20 bg-danger/5"
+            : "border-transparent hover:border-border/40 hover:bg-surface/60"
+        }`}
+      >
+        {/* ── Row 1: expand + dot + name ── */}
+        <div className="flex items-center gap-2 px-2 pt-2 pb-1.5">
           <button
-            onClick={() => onOpenUpgrade(session.id, session.name, upgradeFlow)}
-            title={`Run upgrade: ${upgradeFlow.label ?? session.name}`}
-            className="rounded px-1 py-0.5 text-[10px] font-medium text-indigo-400 hover:bg-indigo-500/15 transition-colors"
+            onClick={onToggle}
+            className="flex-none rounded p-0.5 text-[10px] text-muted hover:text-fg transition-colors"
+            aria-label={expanded ? "Collapse" : "Expand"}
           >
-            🚀
+            {expanded ? "▾" : "▸"}
           </button>
-        )}
-        {state === "connected" && (
+          <span
+            className={`shrink-0 h-2 w-2 rounded-full ${statusRingColor}`}
+            style={session.color ? { boxShadow: `0 0 0 2px ${session.color}22` } : undefined}
+          />
           <button
-            onClick={() => onOpenWizard(session.id, upgradeFlow)}
-            title={upgradeFlow ? "Edit upgrade flow" : "Set up upgrade flow"}
-            className="rounded p-0.5 text-[10px] text-muted hover:text-fg"
+            onClick={onToggle}
+            className="min-w-0 flex-1 truncate text-left text-[13px] font-semibold text-fg hover:text-fg"
+            title={`${session.username}@${session.host}:${session.port}`}
           >
-            ⚙
+            {session.name}
           </button>
-        )}
-        {state === "connected" && (
-          <button
-            onClick={onToggleConsole}
-            className={`rounded p-0.5 text-[10px] ${consoleOpen ? "text-accent" : "text-muted hover:text-fg"}`}
-            title="Toggle console"
-          >
-            {">_"}
-          </button>
-        )}
-        {state === "connected" && (
-          <button
-            onClick={() => ws.refreshContainers(session.id)}
-            disabled={!!loading}
-            className="rounded p-0.5 text-[10px] text-muted hover:text-fg disabled:opacity-40"
-            title="Refresh containers"
-          >
-            ↻
-          </button>
-        )}
-        {(state === "idle" || state === "error") && (
-          <button
-            onClick={() => ws.connect(session.id)}
-            className="rounded px-1.5 py-0.5 text-[10px] text-accent hover:bg-accent/10"
-          >
-            Connect
-          </button>
-        )}
-        {state === "connecting" && (
-          <span className="text-[10px] text-warn">…</span>
-        )}
-        {state === "connected" && (
-          <button
-            onClick={() => ws.disconnect(session.id)}
-            className="rounded p-0.5 text-[10px] text-muted hover:text-danger"
-            title="Disconnect"
-          >
-            ✕
-          </button>
-        )}
-      </div>
-
-      {state === "error" && error && (
-        <div className="ml-6 px-2 pb-1 text-[11px] text-danger">
-          {error}
-          {reconnectAttempts > 0 && (
-            <span className="ml-1 text-muted">(retry {reconnectAttempts})</span>
+          {isConnected && (
+            <span className="shrink-0 rounded-full bg-ok/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-ok">
+              live
+            </span>
+          )}
+          {isConnecting && (
+            <span className="shrink-0 rounded-full bg-warn/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-warn">
+              connecting
+            </span>
           )}
         </div>
-      )}
+
+        {/* ── Row 2: host info + action buttons (connected) ── */}
+        {isConnected && (
+          <div className="flex items-center justify-between gap-1 px-2 pb-2">
+            <span className="min-w-0 truncate text-[10px] text-muted">
+              {session.username}@{session.host}
+            </span>
+            <div className="flex shrink-0 items-center gap-0.5">
+              {upgradeFlow && (
+                <button
+                  onClick={() => onOpenUpgrade(session.id, session.name, upgradeFlow)}
+                  title={`Run upgrade: ${upgradeFlow.label ?? session.name}`}
+                  className="rounded p-1 text-indigo-400 hover:bg-indigo-500/15 transition-colors"
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/>
+                    <path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/>
+                    <path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/>
+                    <path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/>
+                  </svg>
+                </button>
+              )}
+              {s3Config && (
+                <button
+                  onClick={handleServerS3Upload}
+                  disabled={serverUploading}
+                  title="Back up all container logs to S3"
+                  className="rounded p-1 text-muted hover:text-accent hover:bg-accent/10 disabled:opacity-40 transition-colors"
+                >
+                  {serverUploading ? (
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-spin">
+                      <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+                    </svg>
+                  ) : (
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"/>
+                      <path d="M12 12v9"/>
+                      <path d="m16 16-4-4-4 4"/>
+                    </svg>
+                  )}
+                </button>
+              )}
+              <button
+                onClick={() => onOpenWizard(session.id, upgradeFlow)}
+                title={upgradeFlow ? "Edit upgrade flow" : "Set up upgrade flow"}
+                className="rounded p-1 text-muted hover:text-fg hover:bg-surface-2 transition-colors"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
+                  <circle cx="12" cy="12" r="3"/>
+                </svg>
+              </button>
+              <button
+                onClick={onToggleConsole}
+                title="Toggle console"
+                className={`rounded p-1 transition-colors ${consoleOpen ? "text-accent bg-accent/10" : "text-muted hover:text-fg hover:bg-surface-2"}`}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="4 17 10 11 4 5"/>
+                  <line x1="12" x2="20" y1="19" y2="19"/>
+                </svg>
+              </button>
+              <button
+                onClick={() => ws.refreshContainers(session.id)}
+                disabled={!!loading}
+                title="Refresh containers"
+                className="rounded p-1 text-muted hover:text-fg hover:bg-surface-2 disabled:opacity-40 transition-colors"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+                  <path d="M21 3v5h-5"/>
+                  <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+                  <path d="M8 16H3v5"/>
+                </svg>
+              </button>
+              <button
+                onClick={() => ws.disconnect(session.id)}
+                title="Disconnect"
+                className="rounded p-1 text-muted hover:text-danger hover:bg-danger/10 transition-colors"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" x2="6" y1="6" y2="18"/><line x1="6" x2="18" y1="6" y2="18"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ── Row 2: connect button (idle) ── */}
+        {isIdle && (
+          <div className="px-2 pb-2">
+            <button
+              onClick={() => ws.connect(session.id)}
+              className="w-full rounded-md bg-accent/10 px-3 py-1.5 text-[11px] font-semibold text-accent hover:bg-accent/20 transition-colors"
+            >
+              Connect
+            </button>
+          </div>
+        )}
+
+        {/* ── Row 2: error + retry (error) ── */}
+        {isError && (
+          <div className="px-2 pb-2 space-y-1.5">
+            {error && (
+              <div className="text-[10px] text-danger leading-tight">
+                {error}
+                {reconnectAttempts > 0 && (
+                  <span className="ml-1 text-muted/70">(retry {reconnectAttempts})</span>
+                )}
+              </div>
+            )}
+            <button
+              onClick={() => ws.connect(session.id)}
+              className="w-full rounded-md border border-danger/30 bg-danger/5 px-3 py-1.5 text-[11px] font-semibold text-danger hover:bg-danger/15 transition-colors"
+            >
+              Retry connection
+            </button>
+          </div>
+        )}
+      </div>
 
       {expanded && state === "connected" && (
         <div className="ml-4">
@@ -972,6 +1104,25 @@ function LogPane({
   const [exportOpen, setExportOpen] = useState(false);
   const exportRef = useRef<HTMLDivElement>(null);
 
+  // S3 upload
+  const s3Config = useApp((s) => s.s3Config);
+  const s3UploadKey = `${sessionId}:${container.id}`;
+  const s3UploadState = useWorkspace((s) => s.s3UploadState[s3UploadKey]);
+  const setS3UploadState = useWorkspace((s) => s.setS3UploadState);
+
+  async function handleS3Upload() {
+    setS3UploadState(sessionId, container.id, { status: "uploading" });
+    try {
+      const key = await s3Api.uploadLogs(sessionId, container.id, container.name);
+      setS3UploadState(sessionId, container.id, { status: "done", s3Key: key });
+      toast("ok", `Logs uploaded → ${key}`);
+    } catch (e) {
+      const msg = errorMessage(e);
+      setS3UploadState(sessionId, container.id, { status: "error", error: msg });
+      toast("error", `S3 upload failed: ${msg}`);
+    }
+  }
+
   const filters = useRules((s) => s.filters);
   const highlights = useRules((s) => s.highlights);
   const addFilter = useRules((s) => s.addFilter);
@@ -1269,7 +1420,56 @@ function LogPane({
           {container.id.slice(0, 12)}
         </span>
         {container.status && <span className="text-muted">{container.status}</span>}
-        <div className="ml-auto flex flex-wrap items-center gap-1.5">
+
+        {/* Container-level S3 upload — always visible, prominent badge */}
+        <button
+          onClick={s3Config ? handleS3Upload : undefined}
+          disabled={s3UploadState?.status === "uploading"}
+          title={
+            !s3Config
+              ? "S3 not configured — go to Settings → S3 Log Backup"
+              : s3UploadState?.status === "done"
+                ? `Uploaded → ${s3UploadState.s3Key}`
+                : s3UploadState?.status === "error"
+                  ? `Upload failed — click to retry`
+                  : "Upload this container's logs to S3"
+          }
+          className={[
+            "ml-auto flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[12px] font-medium transition-all select-none",
+            s3UploadState?.status === "done"
+              ? "border-ok/50 bg-ok/10 text-ok"
+              : s3UploadState?.status === "error"
+                ? "border-danger/50 bg-danger/10 text-danger cursor-pointer hover:bg-danger/20"
+              : s3UploadState?.status === "uploading"
+                ? "border-accent/40 bg-accent/10 text-accent cursor-wait"
+              : s3Config
+                ? "border-border text-muted cursor-pointer hover:border-accent/60 hover:bg-accent/10 hover:text-accent"
+              : "border-dashed border-border/50 text-muted/40 cursor-default",
+          ].join(" ")}
+        >
+          {s3UploadState?.status === "uploading" ? (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="animate-spin">
+              <path d="M21 12a9 9 0 11-6.219-8.56"/>
+            </svg>
+          ) : (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+          )}
+          <span>
+            {s3UploadState?.status === "uploading"
+              ? "Uploading…"
+              : s3UploadState?.status === "done"
+                ? "Uploaded"
+                : s3UploadState?.status === "error"
+                  ? "Retry S3"
+                  : "S3 Backup"}
+          </span>
+        </button>
+
+        <div className="flex flex-wrap items-center gap-1.5">
           {/* Filter input */}
           <Input
             value={filter}

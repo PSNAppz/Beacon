@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { api, errorMessage } from "../lib/ipc";
 import { useApp } from "../lib/store";
 import { Button, Field, Input } from "../components/ui";
+import { S3ConfigForm } from "../features/s3/S3ConfigForm";
 
 export function SettingsPage() {
   const categories = useApp((s) => s.categories);
@@ -212,6 +213,14 @@ export function SettingsPage() {
                 </Button>
               </div>
             </form>
+          </div>
+        </section>
+
+        {/* ── S3 Log Backup section ── */}
+        <section className="space-y-3">
+          <h2 className="text-[11px] font-semibold uppercase tracking-wider text-muted">S3 Log Backup</h2>
+          <div className="rounded-lg border border-border bg-surface px-5 py-5">
+            <S3ConfigForm />
           </div>
         </section>
 

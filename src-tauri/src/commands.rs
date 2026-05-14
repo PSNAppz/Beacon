@@ -2,7 +2,7 @@ use crate::archive::ArchiveState;
 use crate::error::{AppError, AppResult};
 use crate::ssh::{self, SessionManager, SshTestResult};
 use crate::ssh::docker::{Container, ContainerStats, LogLine, RemoteCmdResult};
-use crate::storage::{self, Category, Session, SessionInput, Vault, VaultState};
+use crate::storage::{self, Category, S3ConfigInput, S3ConfigPublic, Session, SessionInput, Vault, VaultState};
 use crate::transfer::{ImportPreview};
 use std::sync::Arc;
 use tauri::State;
@@ -316,4 +316,48 @@ pub fn send_upgrade_input(
     manager.send_upgrade_input(&run_id, &text)
 }
 
+// ─── S3 log backup ────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn get_s3_config(state: State<'_, VaultState>) -> AppResult<Option<S3ConfigPublic>> {
+    with_vault(&state, |v| storage::s3_config::get_public(v))
+}
+
+#[tauri::command]
+pub fn save_s3_config(
+    state: State<'_, VaultState>,
+    input: S3ConfigInput,
+) -> AppResult<S3ConfigPublic> {
+    with_vault(&state, |v| storage::s3_config::upsert(v, input))
+}
+
+#[tauri::command]
+pub fn delete_s3_config(state: State<'_, VaultState>) -> AppResult<()> {
+    with_vault(&state, |v| storage::s3_config::delete(v))
+}
+
+/// Fetch all logs from a container via SSH and upload them to S3.
+/// The S3 key is returned so the frontend can display it.
+#[tauri::command]
+pub async fn upload_container_logs_to_s3(
+    app: tauri::AppHandle,
+    manager: State<'_, Arc<SessionManager>>,
+    state: State<'_, VaultState>,
+    session_id: String,
+    container_id: String,
+    container_name: String,
+) -> AppResult<String> {
+    let vault = snapshot_vault(&state)?;
+
+    let s3_cfg = storage::s3_config::get(&vault)?
+        .ok_or_else(|| AppError::Other("S3 is not configured".into()))?;
+
+    let session = storage::sessions::get(&vault, &session_id)?;
+
+    let mgr = manager.inner().clone();
+    let logs = ssh::docker::fetch_container_logs(&mgr, &session_id, &container_id).await?;
+
+    let key = crate::s3::upload_logs(app, &s3_cfg, &session.name, &container_name, logs).await?;
+    Ok(key)
+}
 

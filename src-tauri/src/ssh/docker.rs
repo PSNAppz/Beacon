@@ -284,6 +284,43 @@ pub async fn run_remote_command(
     })
 }
 
+/// Fetch all logs from a container via `docker logs --timestamps`.
+/// Unlike `run_remote_command`, there is no size cap — the full output is
+/// returned so it can be archived to S3 before a container is restarted.
+pub async fn fetch_container_logs(
+    manager: &SessionManager,
+    session_id: &str,
+    container_id: &str,
+) -> AppResult<String> {
+    if !is_safe_container_ref(container_id) {
+        return Err(AppError::Ssh("invalid container id".into()));
+    }
+    let conn = manager.require(session_id)?;
+    let mut ch = conn
+        .handle
+        .channel_open_session()
+        .await
+        .map_err(|e| AppError::Ssh(format!("open channel: {e}")))?;
+    let inner = format!("docker logs --timestamps {container_id}");
+    let cmd = wrap_command(&inner, conn.use_sudo);
+    ch.exec(true, cmd.as_str())
+        .await
+        .map_err(|e| AppError::Ssh(format!("exec docker logs: {e}")))?;
+
+    // docker logs writes to stderr; capture both stdout and stderr from the channel.
+    let mut output = Vec::new();
+    loop {
+        match ch.wait().await {
+            Some(ChannelMsg::Data { ref data }) => output.extend_from_slice(data),
+            Some(ChannelMsg::ExtendedData { ref data, .. }) => output.extend_from_slice(data),
+            Some(ChannelMsg::ExitStatus { .. }) | Some(ChannelMsg::Eof) => {}
+            Some(ChannelMsg::Close) | None => break,
+            _ => {}
+        }
+    }
+    Ok(String::from_utf8_lossy(&output).to_string())
+}
+
 pub async fn start_log_stream(
     app: AppHandle,
     manager: Arc<SessionManager>,

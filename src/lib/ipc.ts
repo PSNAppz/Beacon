@@ -283,3 +283,33 @@ export function onUpgradeComplete(cb: (e: UpgradeComplete) => void): Promise<Unl
   return listen<UpgradeComplete>("upgrade:complete", (e) => cb(e.payload));
 }
 
+// ─── S3 log backup ────────────────────────────────────────────────────────────
+
+export interface S3ConfigPublic {
+  bucket: string;
+  region: string;
+  aws_access_key_id: string;
+  has_secret: boolean;
+}
+
+export interface S3ConfigInput {
+  bucket: string;
+  region: string;
+  aws_access_key_id: string;
+  /** Plaintext secret. Pass null to keep existing value. */
+  aws_secret_key: string | null;
+}
+
+export const s3Api = {
+  getConfig: () => invoke<S3ConfigPublic | null>("get_s3_config"),
+  saveConfig: (input: S3ConfigInput) =>
+    invoke<S3ConfigPublic>("save_s3_config", { input }),
+  deleteConfig: () => invoke<void>("delete_s3_config"),
+  uploadLogs: (sessionId: string, containerId: string, containerName: string) =>
+    invoke<string>("upload_container_logs_to_s3", {
+      sessionId,
+      containerId,
+      containerName,
+    }),
+};
+

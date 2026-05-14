@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { api, Category, Session } from "./ipc";
+import { api, Category, S3ConfigPublic, s3Api, Session } from "./ipc";
 import { useWorkspace } from "./workspaceStore";
 
 type VaultStatus = "unknown" | "uninitialized" | "locked" | "unlocked";
@@ -9,11 +9,14 @@ interface AppState {
   sessions: Session[];
   loadingSessions: boolean;
   categories: Category[];
+  s3Config: S3ConfigPublic | null;
   bootstrap: () => Promise<void>;
   setUnlocked: () => Promise<void>;
   lock: () => Promise<void>;
   refreshSessions: () => Promise<void>;
   refreshCategories: () => Promise<void>;
+  refreshS3Config: () => Promise<void>;
+  setS3Config: (config: S3ConfigPublic | null) => void;
   upsertSessionLocal: (s: Session) => void;
   removeSessionLocal: (id: string) => void;
   upsertCategoryLocal: (c: Category) => void;
@@ -25,6 +28,7 @@ export const useApp = create<AppState>((set, get) => ({
   sessions: [],
   loadingSessions: false,
   categories: [],
+  s3Config: null,
 
   async bootstrap() {
     const init = await api.vaultIsInitialized();
@@ -32,21 +36,28 @@ export const useApp = create<AppState>((set, get) => ({
     const unlocked = await api.vaultIsUnlocked();
     set({ vaultStatus: unlocked ? "unlocked" : "locked" });
     if (unlocked) {
-      await get().refreshSessions();
-      await get().refreshCategories();
+      await Promise.all([
+        get().refreshSessions(),
+        get().refreshCategories(),
+        get().refreshS3Config(),
+      ]);
     }
   },
 
   async setUnlocked() {
     set({ vaultStatus: "unlocked" });
-    await Promise.all([get().refreshSessions(), get().refreshCategories()]);
+    await Promise.all([
+      get().refreshSessions(),
+      get().refreshCategories(),
+      get().refreshS3Config(),
+    ]);
   },
 
   async lock() {
     // Disconnect all active SSH sessions before locking the vault.
     await useWorkspace.getState().disconnectAll();
     await api.vaultLock();
-    set({ vaultStatus: "locked", sessions: [], categories: [] });
+    set({ vaultStatus: "locked", sessions: [], categories: [], s3Config: null });
   },
 
   async refreshSessions() {
@@ -62,6 +73,15 @@ export const useApp = create<AppState>((set, get) => ({
   async refreshCategories() {
     const categories = await api.listCategories().catch(() => [] as Category[]);
     set({ categories });
+  },
+
+  async refreshS3Config() {
+    const s3Config = await s3Api.getConfig().catch(() => null);
+    set({ s3Config });
+  },
+
+  setS3Config(config) {
+    set({ s3Config: config });
   },
 
   upsertSessionLocal(s) {
