@@ -3,7 +3,6 @@ use crate::storage::S3Config;
 use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
-use chrono::Utc;
 use tauri::{AppHandle, Emitter};
 
 #[derive(serde::Serialize, Clone)]
@@ -15,7 +14,10 @@ struct DiagPayload {
     exit: Option<u32>,
 }
 
-/// Upload `log_content` to S3 at `{session_name}/{container_name}/{timestamp}Z.log`.
+/// Upload `log_content` to S3.
+///
+/// Key format: `{session}/{container}/{start_ts}_to_{until}-{container_id[:12]}.log`
+///
 /// Returns the S3 key that was written.
 /// Emits `diag:command` events so the console pane shows progress and errors.
 pub async fn upload_logs(
@@ -23,6 +25,8 @@ pub async fn upload_logs(
     config: &S3Config,
     session_name: &str,
     container_name: &str,
+    start_ts: &str,
+    end_ts: &str,
     log_content: String,
 ) -> AppResult<String> {
     let creds = Credentials::new(
@@ -39,12 +43,12 @@ pub async fn upload_logs(
         .build();
     let client = Client::from_conf(s3_cfg);
 
-    let ts = Utc::now().format("%Y-%m-%d_%H-%M-%S").to_string();
     let key = format!(
-        "{}/{}/{}Z.log",
+        "{}/{}/{}_to_{}.log",
         sanitize_s3_segment(session_name),
         sanitize_s3_segment(container_name),
-        ts
+        sanitize_ts(start_ts),
+        sanitize_ts(end_ts),
     );
 
     let cmd_label = format!("PUT s3://{}/{}", config.bucket, key);
@@ -98,6 +102,21 @@ pub async fn upload_logs(
             Err(AppError::Other(format!("S3 upload failed: {detail}")))
         }
     }
+}
+
+/// Convert an RFC3339 timestamp into a filename-safe label by replacing `:` with `-`
+/// and stripping sub-second precision (everything after the seconds digit before `Z`).
+/// e.g. `2026-05-14T10:30:45.123456789Z` → `2026-05-14T10-30-45Z`
+fn sanitize_ts(ts: &str) -> String {
+    // Truncate at the first `.` or keep as-is if no fractional seconds.
+    let trimmed = ts.split('.').next().unwrap_or(ts);
+    // Re-attach trailing Z if the original had it and we stripped it.
+    let with_z = if ts.ends_with('Z') && !trimmed.ends_with('Z') {
+        format!("{trimmed}Z")
+    } else {
+        trimmed.to_string()
+    };
+    with_z.replace(':', "-")
 }
 
 /// Replace characters that are not safe in an S3 key segment with `-`.

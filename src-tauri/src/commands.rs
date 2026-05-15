@@ -336,8 +336,28 @@ pub fn delete_s3_config(state: State<'_, VaultState>) -> AppResult<()> {
     with_vault(&state, |v| storage::s3_config::delete(v))
 }
 
-/// Fetch all logs from a container via SSH and upload them to S3.
-/// The S3 key is returned so the frontend can display it.
+fn extract_last_log_ts(log: &str) -> Option<&str> {
+    log.lines().rev().find_map(|line| {
+        let t = line.split_whitespace().next()?;
+        if t.contains('T') && t.ends_with('Z') { Some(t) } else { None }
+    })
+}
+
+fn extract_first_log_ts(log: &str) -> Option<&str> {
+    log.lines().find_map(|line| {
+        let t = line.split_whitespace().next()?;
+        if t.contains('T') && t.ends_with('Z') { Some(t) } else { None }
+    })
+}
+
+/// Fetch the complete log history of a container via SSH and upload it to S3.
+/// Called automatically just before a server upgrade.
+///
+/// Start and end timestamps are derived from the log content itself so the S3
+/// key always reflects the real log boundaries regardless of client or server clock.
+///
+/// Returns the S3 key that was written, or `"no-new-logs"` when the container has
+/// produced no timestamped output.
 #[tauri::command]
 pub async fn upload_container_logs_to_s3(
     app: tauri::AppHandle,
@@ -355,9 +375,33 @@ pub async fn upload_container_logs_to_s3(
     let session = storage::sessions::get(&vault, &session_id)?;
 
     let mgr = manager.inner().clone();
-    let logs = ssh::docker::fetch_container_logs(&mgr, &session_id, &container_id).await?;
 
-    let key = crate::s3::upload_logs(app, &s3_cfg, &session.name, &container_name, logs).await?;
+    let logs =
+        ssh::docker::fetch_container_logs(&mgr, &session_id, &container_id, None).await?;
+
+    if logs.trim().is_empty() {
+        return Ok("no-new-logs".into());
+    }
+
+    let start_ts = extract_first_log_ts(&logs)
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let end_ts = extract_last_log_ts(&logs)
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let key = crate::s3::upload_logs(
+        app,
+        &s3_cfg,
+        &session.name,
+        &container_name,
+        &start_ts,
+        &end_ts,
+        logs,
+    )
+    .await?;
+
     Ok(key)
 }
 

@@ -284,10 +284,9 @@ pub async fn run_remote_command(
     })
 }
 
-/// Fetch all logs from a container via `docker logs --timestamps`.
-/// Unlike `run_remote_command`, there is no size cap — the full output is
-/// returned so it can be archived to S3 before a container is restarted.
-pub async fn fetch_container_logs(
+/// Return the RFC3339 timestamp of when a container last started, via `docker inspect`.
+/// Used to anchor the start of the first S3 log upload window.
+pub async fn get_container_started_at(
     manager: &SessionManager,
     session_id: &str,
     container_id: &str,
@@ -301,7 +300,52 @@ pub async fn fetch_container_logs(
         .channel_open_session()
         .await
         .map_err(|e| AppError::Ssh(format!("open channel: {e}")))?;
-    let inner = format!("docker logs --timestamps {container_id}");
+    let inner = format!("docker inspect {container_id} --format '{{{{.State.StartedAt}}}}'");
+    let cmd = wrap_command(&inner, conn.use_sudo);
+    ch.exec(true, cmd.as_str())
+        .await
+        .map_err(|e| AppError::Ssh(format!("exec docker inspect: {e}")))?;
+
+    let mut out = Vec::new();
+    loop {
+        match ch.wait().await {
+            Some(ChannelMsg::Data { ref data }) => out.extend_from_slice(data),
+            Some(ChannelMsg::ExtendedData { ref data, .. }) => out.extend_from_slice(data),
+            Some(ChannelMsg::Close) | None => break,
+            _ => {}
+        }
+    }
+    let started = String::from_utf8_lossy(&out).trim().to_string();
+    if started.is_empty() {
+        return Err(AppError::Ssh("docker inspect returned empty StartedAt".into()));
+    }
+    Ok(started)
+}
+
+/// Fetch logs from a container for S3 archiving.
+/// `since` is passed to `docker logs --since`; omitting it fetches from the beginning.
+/// No `--until` is used — the upper bound is always the live log tail, avoiding any
+/// client/server clock skew that would silently truncate the output.
+/// Unlike `run_remote_command`, there is no size cap.
+pub async fn fetch_container_logs(
+    manager: &SessionManager,
+    session_id: &str,
+    container_id: &str,
+    since: Option<&str>,
+) -> AppResult<String> {
+    if !is_safe_container_ref(container_id) {
+        return Err(AppError::Ssh("invalid container id".into()));
+    }
+    let conn = manager.require(session_id)?;
+    let mut ch = conn
+        .handle
+        .channel_open_session()
+        .await
+        .map_err(|e| AppError::Ssh(format!("open channel: {e}")))?;
+    let inner = match since {
+        Some(ts) => format!("docker logs --timestamps --since {ts} {container_id}"),
+        None => format!("docker logs --timestamps {container_id}"),
+    };
     let cmd = wrap_command(&inner, conn.use_sudo);
     ch.exec(true, cmd.as_str())
         .await

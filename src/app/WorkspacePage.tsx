@@ -36,6 +36,7 @@ import { RulesModal } from "../features/rules/RulesModal";
 import { UpgradeFlowWizard } from "../features/upgrades/UpgradeFlowWizard";
 import { UpgradeConfirmDialog } from "../features/upgrades/UpgradeConfirmDialog";
 import { UpgradeRunPanel } from "../features/upgrades/UpgradeRunPanel";
+import { S3BackupPhasePanel, type S3BackupPhase } from "../features/upgrades/S3BackupPhasePanel";
 
 const MAX_LINES = 10_000;
 const ROW_HEIGHT = 18;
@@ -75,6 +76,14 @@ export function WorkspacePage() {
     steps: string[];
     runId: string;
   } | null>(null);
+
+  const [s3BackupPhase, setS3BackupPhase] = useState<S3BackupPhase | null>(null);
+
+  function handleS3BackupProceed() {
+    if (!s3BackupPhase) return;
+    setRunTarget({ sessionId: s3BackupPhase.sessionId, steps: s3BackupPhase.pendingSteps, runId: s3BackupPhase.pendingRunId });
+    setS3BackupPhase(null);
+  }
 
   // Load flow when a session connects (one flow per server)
   useEffect(() => {
@@ -266,19 +275,25 @@ export function WorkspacePage() {
 
         {/* Console strip */}
         {consoleSessionId && consoleConn === "connected" && (
-          runTarget && runTarget.sessionId === consoleSessionId
-            ? <UpgradeRunPanel
-                sessionId={runTarget.sessionId}
-                runId={runTarget.runId}
-                steps={runTarget.steps}
-                onClose={() => setRunTarget(null)}
-                onComplete={() => {}}
+          s3BackupPhase && s3BackupPhase.sessionId === consoleSessionId
+            ? <S3BackupPhasePanel
+                phase={s3BackupPhase}
+                onProceed={handleS3BackupProceed}
+                onCancel={() => setS3BackupPhase(null)}
               />
-            : <ConsolePane
-                sessionId={consoleSessionId}
-                compact={!!activeTab}
-                onClose={() => setConsoleSessionId(null)}
-              />
+            : runTarget && runTarget.sessionId === consoleSessionId
+              ? <UpgradeRunPanel
+                  sessionId={runTarget.sessionId}
+                  runId={runTarget.runId}
+                  steps={runTarget.steps}
+                  onClose={() => setRunTarget(null)}
+                  onComplete={() => {}}
+                />
+              : <ConsolePane
+                  sessionId={consoleSessionId}
+                  compact={!!activeTab}
+                  onClose={() => setConsoleSessionId(null)}
+                />
         )}
       </div>
 
@@ -312,33 +327,49 @@ export function WorkspacePage() {
         <UpgradeConfirmDialog
           sessionName={confirmTarget.sessionName}
           flow={confirmTarget.flow}
+          s3Config={s3Config}
           onConfirm={async (steps) => {
             const runId = crypto.randomUUID();
             const sid = confirmTarget.sessionId;
             setConfirmTarget(null);
             setConsoleSessionId(sid);
 
-            // Back up logs to S3 before the upgrade wipes them
             if (s3Config) {
               const containers = ws.containers[sid] ?? [];
               const running = containers.filter((c) => c.state === "running");
               if (running.length > 0) {
-                toast("ok", `Backing up ${running.length} container log(s) to S3…`);
-                const results = await Promise.allSettled(
-                  running.map((c) => s3Api.uploadLogs(sid, c.id, c.name))
-                );
-                results.forEach((r, i) => {
-                  if (r.status === "fulfilled") {
-                    toast("ok", `${running[i].name} → ${r.value}`);
-                  } else {
-                    toast("error", `S3 backup failed for ${running[i].name}: ${errorMessage(r.reason)}`);
-                  }
+                setS3BackupPhase({
+                  sessionId: sid,
+                  items: running.map((c) => ({ containerName: c.name, status: "uploading" })),
+                  awaitingConfirm: false,
+                  pendingSteps: steps,
+                  pendingRunId: runId,
                 });
-                const hadFailures = results.some((r) => r.status === "rejected");
+
+                const outcomes = await Promise.all(
+                  running.map(async (c, i) => {
+                    try {
+                      const key = await s3Api.uploadLogs(sid, c.id, c.name);
+                      const status = key === "no-new-logs" ? "skipped" : "done";
+                      setS3BackupPhase((prev) =>
+                        prev ? { ...prev, items: prev.items.map((it, idx) => idx === i ? { ...it, status, key } : it) } : null
+                      );
+                      return true;
+                    } catch (e) {
+                      setS3BackupPhase((prev) =>
+                        prev ? { ...prev, items: prev.items.map((it, idx) => idx === i ? { ...it, status: "error", error: errorMessage(e as Error) } : it) } : null
+                      );
+                      return false;
+                    }
+                  })
+                );
+
+                const hadFailures = outcomes.some((ok) => !ok);
                 if (hadFailures) {
-                  const proceed = confirm("Some S3 log backups failed. Continue with the upgrade anyway?");
-                  if (!proceed) return;
+                  setS3BackupPhase((prev) => prev ? { ...prev, awaitingConfirm: true } : null);
+                  return;
                 }
+                setS3BackupPhase(null);
               }
             }
 
@@ -499,31 +530,6 @@ function SessionNode({
   const error = ws.connError[session.id];
   const containerErr = ws.containersError[session.id];
   const reconnectAttempts = ws.reconnectAttempts[session.id] ?? 0;
-  const s3Config = useApp((s) => s.s3Config);
-  const [serverUploading, setServerUploading] = useState(false);
-
-  async function handleServerS3Upload() {
-    if (!s3Config) return;
-    const running = containers.filter((c) => c.state === "running");
-    if (running.length === 0) {
-      toast("ok", "No running containers to back up.");
-      return;
-    }
-    setServerUploading(true);
-    toast("ok", `Backing up ${running.length} container log(s) for ${session.name}…`);
-    const results = await Promise.allSettled(
-      running.map((c) => s3Api.uploadLogs(session.id, c.id, c.name))
-    );
-    results.forEach((r, i) => {
-      if (r.status === "fulfilled") {
-        toast("ok", `${running[i].name} → ${r.value}`);
-      } else {
-        toast("error", `S3 backup failed for ${running[i].name}: ${errorMessage(r.reason)}`);
-      }
-    });
-    setServerUploading(false);
-  }
-
   const statusRingColor =
     state === "connected" ? "bg-ok" :
     state === "connecting" ? "bg-warn animate-pulse" :
@@ -596,26 +602,6 @@ function SessionNode({
                     <path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/>
                     <path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/>
                   </svg>
-                </button>
-              )}
-              {s3Config && (
-                <button
-                  onClick={handleServerS3Upload}
-                  disabled={serverUploading}
-                  title="Back up all container logs to S3"
-                  className="rounded p-1 text-muted hover:text-accent hover:bg-accent/10 disabled:opacity-40 transition-colors"
-                >
-                  {serverUploading ? (
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-spin">
-                      <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
-                    </svg>
-                  ) : (
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"/>
-                      <path d="M12 12v9"/>
-                      <path d="m16 16-4-4-4 4"/>
-                    </svg>
-                  )}
                 </button>
               )}
               <button
@@ -1104,25 +1090,6 @@ function LogPane({
   const [exportOpen, setExportOpen] = useState(false);
   const exportRef = useRef<HTMLDivElement>(null);
 
-  // S3 upload
-  const s3Config = useApp((s) => s.s3Config);
-  const s3UploadKey = `${sessionId}:${container.id}`;
-  const s3UploadState = useWorkspace((s) => s.s3UploadState[s3UploadKey]);
-  const setS3UploadState = useWorkspace((s) => s.setS3UploadState);
-
-  async function handleS3Upload() {
-    setS3UploadState(sessionId, container.id, { status: "uploading" });
-    try {
-      const key = await s3Api.uploadLogs(sessionId, container.id, container.name);
-      setS3UploadState(sessionId, container.id, { status: "done", s3Key: key });
-      toast("ok", `Logs uploaded → ${key}`);
-    } catch (e) {
-      const msg = errorMessage(e);
-      setS3UploadState(sessionId, container.id, { status: "error", error: msg });
-      toast("error", `S3 upload failed: ${msg}`);
-    }
-  }
-
   const filters = useRules((s) => s.filters);
   const highlights = useRules((s) => s.highlights);
   const addFilter = useRules((s) => s.addFilter);
@@ -1421,55 +1388,7 @@ function LogPane({
         </span>
         {container.status && <span className="text-muted">{container.status}</span>}
 
-        {/* Container-level S3 upload — always visible, prominent badge */}
-        <button
-          onClick={s3Config ? handleS3Upload : undefined}
-          disabled={s3UploadState?.status === "uploading"}
-          title={
-            !s3Config
-              ? "S3 not configured — go to Settings → S3 Log Backup"
-              : s3UploadState?.status === "done"
-                ? `Uploaded → ${s3UploadState.s3Key}`
-                : s3UploadState?.status === "error"
-                  ? `Upload failed — click to retry`
-                  : "Upload this container's logs to S3"
-          }
-          className={[
-            "ml-auto flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[12px] font-medium transition-all select-none",
-            s3UploadState?.status === "done"
-              ? "border-ok/50 bg-ok/10 text-ok"
-              : s3UploadState?.status === "error"
-                ? "border-danger/50 bg-danger/10 text-danger cursor-pointer hover:bg-danger/20"
-              : s3UploadState?.status === "uploading"
-                ? "border-accent/40 bg-accent/10 text-accent cursor-wait"
-              : s3Config
-                ? "border-border text-muted cursor-pointer hover:border-accent/60 hover:bg-accent/10 hover:text-accent"
-              : "border-dashed border-border/50 text-muted/40 cursor-default",
-          ].join(" ")}
-        >
-          {s3UploadState?.status === "uploading" ? (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="animate-spin">
-              <path d="M21 12a9 9 0 11-6.219-8.56"/>
-            </svg>
-          ) : (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
-              <polyline points="17 8 12 3 7 8"/>
-              <line x1="12" y1="3" x2="12" y2="15"/>
-            </svg>
-          )}
-          <span>
-            {s3UploadState?.status === "uploading"
-              ? "Uploading…"
-              : s3UploadState?.status === "done"
-                ? "Uploaded"
-                : s3UploadState?.status === "error"
-                  ? "Retry S3"
-                  : "S3 Backup"}
-          </span>
-        </button>
-
-        <div className="flex flex-wrap items-center gap-1.5">
+        <div className="ml-auto flex flex-wrap items-center gap-1.5">
           {/* Filter input */}
           <Input
             value={filter}

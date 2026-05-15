@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { UpgradeFlow } from "../../lib/ipc";
+import { UpgradeFlow, S3ConfigPublic } from "../../lib/ipc";
 
 interface Props {
   sessionName: string;
   flow: UpgradeFlow;
+  s3Config?: S3ConfigPublic | null;
   onConfirm: (steps: string[]) => void;
   onCancel: () => void;
 }
@@ -14,7 +15,7 @@ function resolveSteps(flow: UpgradeFlow): string[] {
   return flow.steps.map((s) => `cd ${dir} && ${s}`);
 }
 
-export function UpgradeConfirmDialog({ sessionName, flow, onConfirm, onCancel }: Props) {
+export function UpgradeConfirmDialog({ sessionName, flow, s3Config, onConfirm, onCancel }: Props) {
   const [steps, setSteps] = useState<string[]>(resolveSteps(flow));
 
   function updateStep(i: number, val: string) {
@@ -45,6 +46,31 @@ export function UpgradeConfirmDialog({ sessionName, flow, onConfirm, onCancel }:
               Review and edit commands before running. Changes here are <strong>not saved</strong> — they only affect this run.
             </p>
           </div>
+
+          {s3Config ? (
+            <div className="flex items-start gap-2.5 bg-sky-500/8 border border-sky-500/20 rounded-lg px-3.5 py-3">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-sky-400 shrink-0 mt-0.5">
+                <path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"/>
+                <path d="M12 12v9"/><path d="m16 16-4-4-4 4"/>
+              </svg>
+              <div className="text-xs text-sky-200/70 space-y-0.5">
+                <p className="font-medium text-sky-300/90">Logs will be backed up to S3 before upgrading</p>
+                <p>
+                  Bucket: <code className="text-sky-200 bg-white/5 px-1 py-0.5 rounded font-mono">{s3Config.bucket}</code>
+                  <span className="mx-1.5 text-white/20">·</span>
+                  Region: <code className="text-sky-200 bg-white/5 px-1 py-0.5 rounded font-mono">{s3Config.region}</code>
+                </p>
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-start gap-2.5 bg-white/4 border border-white/8 rounded-lg px-3.5 py-3">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-white/30 shrink-0 mt-0.5">
+                <path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"/>
+                <path d="M12 12v9"/><path d="m16 16-4-4-4 4"/>
+              </svg>
+              <p className="text-xs text-white/30">S3 not configured — logs will not be backed up before upgrading.</p>
+            </div>
+          )}
 
           {flow.working_directory && (
             <div className="flex items-center gap-2 text-xs text-white/40">

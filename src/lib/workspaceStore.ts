@@ -50,15 +50,6 @@ function cancelReconnect(sessionId: string) {
   reconnectTimers.delete(sessionId);
 }
 
-export type S3UploadStatus = "idle" | "uploading" | "done" | "error";
-
-export interface S3UploadState {
-  status: S3UploadStatus;
-  /** S3 key returned on success */
-  s3Key?: string;
-  error?: string;
-}
-
 export interface WorkspaceStore {
   connState: Record<string, ConnState>;
   connError: Record<string, string>;
@@ -66,9 +57,6 @@ export interface WorkspaceStore {
   containers: Record<string, Container[]>;
   containersLoading: Record<string, boolean>;
   containersError: Record<string, string | null>;
-
-  /** Keyed by `${sessionId}:${containerId}` */
-  s3UploadState: Record<string, S3UploadState>;
 
   tabs: Tab[];
   activeTabId: string | null;
@@ -87,7 +75,6 @@ export interface WorkspaceStore {
   setActiveTab: (tabId: string) => void;
   setSplitTab: (tabId: string | null) => void;
   markStorageRestored: () => void;
-  setS3UploadState: (sessionId: string, containerId: string, state: S3UploadState) => void;
 }
 
 export const useWorkspace = create<WorkspaceStore>((set, get) => ({
@@ -97,7 +84,6 @@ export const useWorkspace = create<WorkspaceStore>((set, get) => ({
   containers: {},
   containersLoading: {},
   containersError: {},
-  s3UploadState: {},
 
   tabs: [],
   activeTabId: null,
@@ -107,11 +93,6 @@ export const useWorkspace = create<WorkspaceStore>((set, get) => ({
 
   markStorageRestored() {
     set({ storageRestored: true });
-  },
-
-  setS3UploadState(sessionId, containerId, state) {
-    const key = `${sessionId}:${containerId}`;
-    set((s) => ({ s3UploadState: { ...s.s3UploadState, [key]: state } }));
   },
 
   async connect(sessionId) {
