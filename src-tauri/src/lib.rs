@@ -2,6 +2,7 @@ mod archive;
 mod commands;
 mod crypto;
 mod error;
+mod s3;
 mod ssh;
 mod storage;
 mod transfer;
@@ -48,6 +49,15 @@ pub fn run() {
             commands::export_sessions,
             commands::preview_import,
             commands::import_sessions,
+            commands::get_upgrade_flow,
+            commands::save_upgrade_flow,
+            commands::delete_upgrade_flow,
+            commands::run_upgrade_flow,
+            commands::send_upgrade_input,
+            commands::get_s3_config,
+            commands::save_s3_config,
+            commands::delete_s3_config,
+            commands::upload_container_logs_to_s3,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

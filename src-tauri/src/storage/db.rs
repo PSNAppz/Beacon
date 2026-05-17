@@ -130,6 +130,44 @@ impl Vault {
             }
         }
 
+        // s3_config table (singleton row id=1)
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS s3_config (
+                 id                INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+                 bucket            TEXT    NOT NULL,
+                 region            TEXT    NOT NULL,
+                 aws_access_key_id TEXT    NOT NULL,
+                 aws_secret_b64    TEXT    NOT NULL,
+                 created_at        INTEGER NOT NULL,
+                 updated_at        INTEGER NOT NULL
+             );",
+        )?;
+
+        // upgrade_flows table (per-server, not per-container).
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS upgrade_flows (
+                 id                TEXT PRIMARY KEY,
+                 session_id        TEXT NOT NULL UNIQUE,
+                 label             TEXT,
+                 working_directory TEXT,
+                 steps             TEXT NOT NULL DEFAULT '[]',
+                 created_at        INTEGER NOT NULL,
+                 updated_at        INTEGER NOT NULL,
+                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+             );",
+        )?;
+        // Add working_directory to existing installs that predate this column.
+        let has_working_dir: bool = conn
+            .query_row(
+                "SELECT 1 FROM pragma_table_info('upgrade_flows') WHERE name = 'working_directory'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if !has_working_dir {
+            conn.execute("ALTER TABLE upgrade_flows ADD COLUMN working_directory TEXT", [])?;
+        }
+
         Ok(())
     }
 
@@ -232,6 +270,23 @@ impl Vault {
                 conn.execute(
                     "UPDATE sessions SET aws_secret_b64 = ?1 WHERE id = ?2",
                     params![re_encrypted, id],
+                )?;
+            }
+
+            // Re-encrypt S3 secret if present
+            let s3_secret: Option<String> = conn
+                .query_row(
+                    "SELECT aws_secret_b64 FROM s3_config WHERE id = 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(None);
+            if let Some(s3_b64) = s3_secret {
+                let plaintext = old_key.decrypt_from_b64(&s3_b64)?;
+                let re_encrypted = new_key.encrypt_to_b64(&plaintext)?;
+                conn.execute(
+                    "UPDATE s3_config SET aws_secret_b64 = ?1 WHERE id = 1",
+                    params![re_encrypted],
                 )?;
             }
 

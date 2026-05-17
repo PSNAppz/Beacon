@@ -7,12 +7,15 @@ import {
   onDiagCommand,
   onLogBatch,
   onLogEnd,
+  s3Api,
+  upgradeApi,
   type Container,
   type ContainerStats,
   type DiagCommand,
   type LogLine,
   type RemoteCmdResult,
   type Session,
+  type UpgradeFlow,
 } from "../lib/ipc";
 import { useApp } from "../lib/store";
 import { toast } from "../lib/toastStore";
@@ -30,6 +33,10 @@ import {
 import { Button, Input } from "../components/ui";
 import { CommandPalette } from "./CommandPalette";
 import { RulesModal } from "../features/rules/RulesModal";
+import { UpgradeFlowWizard } from "../features/upgrades/UpgradeFlowWizard";
+import { UpgradeConfirmDialog } from "../features/upgrades/UpgradeConfirmDialog";
+import { UpgradeRunPanel } from "../features/upgrades/UpgradeRunPanel";
+import { S3BackupPhasePanel, type S3BackupPhase } from "../features/upgrades/S3BackupPhasePanel";
 
 const MAX_LINES = 10_000;
 const ROW_HEIGHT = 18;
@@ -39,11 +46,74 @@ const ROW_HEIGHT = 18;
 export function WorkspacePage() {
   const { sessionId: routeSessionId } = useParams<{ sessionId?: string }>();
   const sessions = useApp((s) => s.sessions);
+  const s3Config = useApp((s) => s.s3Config);
   const ws = useWorkspace();
 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [consoleSessionId, setConsoleSessionId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  // ── Upgrade flow state ────────────────────────────────────────────────────
+  // upgradeFlows: session_id -> UpgradeFlow | null
+  const [upgradeFlows, setUpgradeFlows] = useState<Record<string, UpgradeFlow | null>>({});
+
+  // Wizard: configure / edit a flow
+  const [wizardTarget, setWizardTarget] = useState<{
+    sessionId: string;
+    existing: UpgradeFlow | null;
+  } | null>(null);
+
+  // Confirm: pre-flight dialog before running
+  const [confirmTarget, setConfirmTarget] = useState<{
+    sessionId: string;
+    sessionName: string;
+    flow: UpgradeFlow;
+  } | null>(null);
+
+  // Run panel
+  const [runTarget, setRunTarget] = useState<{
+    sessionId: string;
+    steps: string[];
+    runId: string;
+  } | null>(null);
+
+  const [s3BackupPhase, setS3BackupPhase] = useState<S3BackupPhase | null>(null);
+
+  function handleS3BackupProceed() {
+    if (!s3BackupPhase) return;
+    setRunTarget({ sessionId: s3BackupPhase.sessionId, steps: s3BackupPhase.pendingSteps, runId: s3BackupPhase.pendingRunId });
+    setS3BackupPhase(null);
+  }
+
+  // Load flow when a session connects (one flow per server)
+  useEffect(() => {
+    const connected = Object.entries(ws.connState)
+      .filter(([, s]) => s === "connected")
+      .map(([id]) => id);
+    connected.forEach((sid) => {
+      if (!(sid in upgradeFlows)) {
+        upgradeApi.getFlow(sid).then((flow) => {
+          setUpgradeFlows((prev) => ({ ...prev, [sid]: flow }));
+        }).catch(() => {});
+      }
+    });
+  }, [ws.connState]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Trigger the upgrade run exactly once when a runTarget is set.
+  // Keeping this in WorkspacePage (not inside UpgradeRunPanel) prevents
+  // re-running when the console panel is toggled off and back on.
+  useEffect(() => {
+    if (!runTarget) return;
+    upgradeApi
+      .runFlow({ sessionId: runTarget.sessionId, steps: runTarget.steps, runId: runTarget.runId })
+      .catch(() => {});
+  }, [runTarget?.runId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function refreshFlow(sessionId: string) {
+    upgradeApi.getFlow(sessionId).then((flow) => {
+      setUpgradeFlows((prev) => ({ ...prev, [sessionId]: flow }));
+    }).catch(() => {});
+  }
 
   // Diff state: tracks whether side-by-side diff mode is on and provides a
   // shared registry for each pane to write/read its filtered lines.
@@ -133,6 +203,13 @@ export function WorkspacePage() {
           sessions={sessions}
           ws={ws}
           consoleSessionId={consoleSessionId}
+          upgradeFlows={upgradeFlows}
+          onOpenWizard={(sessionId, existing) =>
+            setWizardTarget({ sessionId, existing })
+          }
+          onOpenUpgrade={(sessionId, sessionName, flow) =>
+            setConfirmTarget({ sessionId, sessionName, flow })
+          }
           onToggleConsole={(id) =>
             setConsoleSessionId((cur) => (cur === id ? null : id))
           }
@@ -198,11 +275,25 @@ export function WorkspacePage() {
 
         {/* Console strip */}
         {consoleSessionId && consoleConn === "connected" && (
-          <ConsolePane
-            sessionId={consoleSessionId}
-            compact={!!activeTab}
-            onClose={() => setConsoleSessionId(null)}
-          />
+          s3BackupPhase && s3BackupPhase.sessionId === consoleSessionId
+            ? <S3BackupPhasePanel
+                phase={s3BackupPhase}
+                onProceed={handleS3BackupProceed}
+                onCancel={() => setS3BackupPhase(null)}
+              />
+            : runTarget && runTarget.sessionId === consoleSessionId
+              ? <UpgradeRunPanel
+                  sessionId={runTarget.sessionId}
+                  runId={runTarget.runId}
+                  steps={runTarget.steps}
+                  onClose={() => setRunTarget(null)}
+                  onComplete={() => {}}
+                />
+              : <ConsolePane
+                  sessionId={consoleSessionId}
+                  compact={!!activeTab}
+                  onClose={() => setConsoleSessionId(null)}
+                />
         )}
       </div>
 
@@ -211,6 +302,80 @@ export function WorkspacePage() {
           sessions={sessions}
           ws={ws}
           onClose={() => setPaletteOpen(false)}
+        />
+      )}
+
+      {/* ── Upgrade modals ── */}
+      {wizardTarget && (
+        <UpgradeFlowWizard
+          sessionId={wizardTarget.sessionId}
+          sessionName={sessions.find((s) => s.id === wizardTarget.sessionId)?.name ?? ""}
+          existing={wizardTarget.existing}
+          onSave={(flow) => {
+            refreshFlow(flow.session_id);
+            setWizardTarget(null);
+          }}
+          onDelete={() => {
+            refreshFlow(wizardTarget.sessionId);
+            setWizardTarget(null);
+          }}
+          onClose={() => setWizardTarget(null)}
+        />
+      )}
+
+      {confirmTarget && (
+        <UpgradeConfirmDialog
+          sessionName={confirmTarget.sessionName}
+          flow={confirmTarget.flow}
+          s3Config={s3Config}
+          onConfirm={async (steps) => {
+            const runId = crypto.randomUUID();
+            const sid = confirmTarget.sessionId;
+            setConfirmTarget(null);
+            setConsoleSessionId(sid);
+
+            if (s3Config) {
+              const containers = ws.containers[sid] ?? [];
+              const running = containers.filter((c) => c.state === "running");
+              if (running.length > 0) {
+                setS3BackupPhase({
+                  sessionId: sid,
+                  items: running.map((c) => ({ containerName: c.name, status: "uploading" })),
+                  awaitingConfirm: false,
+                  pendingSteps: steps,
+                  pendingRunId: runId,
+                });
+
+                const outcomes = await Promise.all(
+                  running.map(async (c, i) => {
+                    try {
+                      const key = await s3Api.uploadLogs(sid, c.id, c.name);
+                      const status = key === "no-new-logs" ? "skipped" : "done";
+                      setS3BackupPhase((prev) =>
+                        prev ? { ...prev, items: prev.items.map((it, idx) => idx === i ? { ...it, status, key } : it) } : null
+                      );
+                      return true;
+                    } catch (e) {
+                      setS3BackupPhase((prev) =>
+                        prev ? { ...prev, items: prev.items.map((it, idx) => idx === i ? { ...it, status: "error", error: errorMessage(e as Error) } : it) } : null
+                      );
+                      return false;
+                    }
+                  })
+                );
+
+                const hadFailures = outcomes.some((ok) => !ok);
+                if (hadFailures) {
+                  setS3BackupPhase((prev) => prev ? { ...prev, awaitingConfirm: true } : null);
+                  return;
+                }
+                setS3BackupPhase(null);
+              }
+            }
+
+            setRunTarget({ sessionId: sid, steps, runId });
+          }}
+          onCancel={() => setConfirmTarget(null)}
         />
       )}
     </div>
@@ -223,12 +388,18 @@ function HostTree({
   sessions,
   ws,
   consoleSessionId,
+  upgradeFlows,
+  onOpenWizard,
+  onOpenUpgrade,
   onToggleConsole,
   onCollapse,
 }: {
   sessions: Session[];
   ws: WorkspaceStore;
   consoleSessionId: string | null;
+  upgradeFlows: Record<string, UpgradeFlow | null>;
+  onOpenWizard: (sessionId: string, existing: UpgradeFlow | null) => void;
+  onOpenUpgrade: (sessionId: string, sessionName: string, flow: UpgradeFlow) => void;
   onToggleConsole: (id: string) => void;
   onCollapse: () => void;
 }) {
@@ -315,6 +486,9 @@ function HostTree({
                   onToggle={() => toggle(s.id)}
                   consoleOpen={consoleSessionId === s.id}
                   onToggleConsole={() => onToggleConsole(s.id)}
+                  upgradeFlow={upgradeFlows[s.id] ?? null}
+                  onOpenWizard={onOpenWizard}
+                  onOpenUpgrade={onOpenUpgrade}
                 />
               ))}
             </div>
@@ -336,6 +510,9 @@ function SessionNode({
   onToggle,
   consoleOpen,
   onToggleConsole,
+  upgradeFlow,
+  onOpenWizard,
+  onOpenUpgrade,
 }: {
   session: Session;
   ws: WorkspaceStore;
@@ -343,6 +520,9 @@ function SessionNode({
   onToggle: () => void;
   consoleOpen: boolean;
   onToggleConsole: () => void;
+  upgradeFlow: UpgradeFlow | null;
+  onOpenWizard: (sessionId: string, existing: UpgradeFlow | null) => void;
+  onOpenUpgrade: (sessionId: string, sessionName: string, flow: UpgradeFlow) => void;
 }) {
   const state = ws.connState[session.id] ?? "idle";
   const containers = ws.containers[session.id] ?? [];
@@ -350,80 +530,158 @@ function SessionNode({
   const error = ws.connError[session.id];
   const containerErr = ws.containersError[session.id];
   const reconnectAttempts = ws.reconnectAttempts[session.id] ?? 0;
+  const statusRingColor =
+    state === "connected" ? "bg-ok" :
+    state === "connecting" ? "bg-warn animate-pulse" :
+    state === "error" ? "bg-danger" : "bg-muted/40";
 
-  const dotColor =
-    state === "connected" ? "text-ok" :
-    state === "connecting" ? "text-warn" :
-    state === "error" ? "text-danger" : "text-muted";
+  const isConnected = state === "connected";
+  const isConnecting = state === "connecting";
+  const isIdle = state === "idle";
+  const isError = state === "error";
 
   return (
-    <div>
-      <div className="flex items-center gap-1 px-2 py-1">
-        <button
-          onClick={onToggle}
-          className="flex-none rounded p-0.5 text-[10px] text-muted hover:text-fg"
-          aria-label={expanded ? "Collapse" : "Expand"}
-        >
-          {expanded ? "▾" : "▸"}
-        </button>
-        <span className={`shrink-0 text-[10px] ${dotColor}`}>●</span>
-        <button
-          onClick={onToggle}
-          className="min-w-0 flex-1 truncate text-left text-[13px] font-medium hover:text-fg"
-          title={`${session.username}@${session.host}:${session.port}`}
-        >
-          {session.name}
-        </button>
-
-        {state === "connected" && (
+    <div className="mx-1.5 my-0.5">
+      <div
+        className={`rounded-lg border transition-colors ${
+          isConnected
+            ? "border-border/70 bg-surface"
+            : isError
+            ? "border-danger/20 bg-danger/5"
+            : "border-transparent hover:border-border/40 hover:bg-surface/60"
+        }`}
+      >
+        {/* ── Row 1: expand + dot + name ── */}
+        <div className="flex items-center gap-2 px-2 pt-2 pb-1.5">
           <button
-            onClick={onToggleConsole}
-            className={`rounded p-0.5 text-[10px] ${consoleOpen ? "text-accent" : "text-muted hover:text-fg"}`}
-            title="Toggle console"
+            onClick={onToggle}
+            className="flex-none rounded p-0.5 text-[10px] text-muted hover:text-fg transition-colors"
+            aria-label={expanded ? "Collapse" : "Expand"}
           >
-            {">_"}
+            {expanded ? "▾" : "▸"}
           </button>
-        )}
-        {state === "connected" && (
+          <span
+            className={`shrink-0 h-2 w-2 rounded-full ${statusRingColor}`}
+            style={session.color ? { boxShadow: `0 0 0 2px ${session.color}22` } : undefined}
+          />
           <button
-            onClick={() => ws.refreshContainers(session.id)}
-            disabled={!!loading}
-            className="rounded p-0.5 text-[10px] text-muted hover:text-fg disabled:opacity-40"
-            title="Refresh containers"
+            onClick={onToggle}
+            className="min-w-0 flex-1 truncate text-left text-[13px] font-semibold text-fg hover:text-fg"
+            title={`${session.username}@${session.host}:${session.port}`}
           >
-            ↻
+            {session.name}
           </button>
-        )}
-        {(state === "idle" || state === "error") && (
-          <button
-            onClick={() => ws.connect(session.id)}
-            className="rounded px-1.5 py-0.5 text-[10px] text-accent hover:bg-accent/10"
-          >
-            Connect
-          </button>
-        )}
-        {state === "connecting" && (
-          <span className="text-[10px] text-warn">…</span>
-        )}
-        {state === "connected" && (
-          <button
-            onClick={() => ws.disconnect(session.id)}
-            className="rounded p-0.5 text-[10px] text-muted hover:text-danger"
-            title="Disconnect"
-          >
-            ✕
-          </button>
-        )}
-      </div>
-
-      {state === "error" && error && (
-        <div className="ml-6 px-2 pb-1 text-[11px] text-danger">
-          {error}
-          {reconnectAttempts > 0 && (
-            <span className="ml-1 text-muted">(retry {reconnectAttempts})</span>
+          {isConnected && (
+            <span className="shrink-0 rounded-full bg-ok/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-ok">
+              live
+            </span>
+          )}
+          {isConnecting && (
+            <span className="shrink-0 rounded-full bg-warn/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-warn">
+              connecting
+            </span>
           )}
         </div>
-      )}
+
+        {/* ── Row 2: host info + action buttons (connected) ── */}
+        {isConnected && (
+          <div className="flex items-center justify-between gap-1 px-2 pb-2">
+            <span className="min-w-0 truncate text-[10px] text-muted">
+              {session.username}@{session.host}
+            </span>
+            <div className="flex shrink-0 items-center gap-0.5">
+              {upgradeFlow && (
+                <button
+                  onClick={() => onOpenUpgrade(session.id, session.name, upgradeFlow)}
+                  title={`Run upgrade: ${upgradeFlow.label ?? session.name}`}
+                  className="rounded p-1 text-indigo-400 hover:bg-indigo-500/15 transition-colors"
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/>
+                    <path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/>
+                    <path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/>
+                    <path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/>
+                  </svg>
+                </button>
+              )}
+              <button
+                onClick={() => onOpenWizard(session.id, upgradeFlow)}
+                title={upgradeFlow ? "Edit upgrade flow" : "Set up upgrade flow"}
+                className="rounded p-1 text-muted hover:text-fg hover:bg-surface-2 transition-colors"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
+                  <circle cx="12" cy="12" r="3"/>
+                </svg>
+              </button>
+              <button
+                onClick={onToggleConsole}
+                title="Toggle console"
+                className={`rounded p-1 transition-colors ${consoleOpen ? "text-accent bg-accent/10" : "text-muted hover:text-fg hover:bg-surface-2"}`}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="4 17 10 11 4 5"/>
+                  <line x1="12" x2="20" y1="19" y2="19"/>
+                </svg>
+              </button>
+              <button
+                onClick={() => ws.refreshContainers(session.id)}
+                disabled={!!loading}
+                title="Refresh containers"
+                className="rounded p-1 text-muted hover:text-fg hover:bg-surface-2 disabled:opacity-40 transition-colors"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+                  <path d="M21 3v5h-5"/>
+                  <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+                  <path d="M8 16H3v5"/>
+                </svg>
+              </button>
+              <button
+                onClick={() => ws.disconnect(session.id)}
+                title="Disconnect"
+                className="rounded p-1 text-muted hover:text-danger hover:bg-danger/10 transition-colors"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" x2="6" y1="6" y2="18"/><line x1="6" x2="18" y1="6" y2="18"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ── Row 2: connect button (idle) ── */}
+        {isIdle && (
+          <div className="px-2 pb-2">
+            <button
+              onClick={() => ws.connect(session.id)}
+              className="w-full rounded-md bg-accent/10 px-3 py-1.5 text-[11px] font-semibold text-accent hover:bg-accent/20 transition-colors"
+            >
+              Connect
+            </button>
+          </div>
+        )}
+
+        {/* ── Row 2: error + retry (error) ── */}
+        {isError && (
+          <div className="px-2 pb-2 space-y-1.5">
+            {error && (
+              <div className="text-[10px] text-danger leading-tight">
+                {error}
+                {reconnectAttempts > 0 && (
+                  <span className="ml-1 text-muted/70">(retry {reconnectAttempts})</span>
+                )}
+              </div>
+            )}
+            <button
+              onClick={() => ws.connect(session.id)}
+              className="w-full rounded-md border border-danger/30 bg-danger/5 px-3 py-1.5 text-[11px] font-semibold text-danger hover:bg-danger/15 transition-colors"
+            >
+              Retry connection
+            </button>
+          </div>
+        )}
+      </div>
 
       {expanded && state === "connected" && (
         <div className="ml-4">
@@ -446,9 +704,7 @@ function SessionNode({
                 <button
                   onClick={() => ws.openTab(session.id, c)}
                   className={`w-full rounded px-2 py-1 text-left transition-colors ${
-                    isActive
-                      ? "bg-surface-2 text-fg"
-                      : "text-muted hover:bg-surface-2 hover:text-fg"
+                    isActive ? "bg-surface-2 text-fg" : "text-muted hover:bg-surface-2 hover:text-fg"
                   }`}
                 >
                   <div className="flex items-center gap-1.5 pr-5">
@@ -474,10 +730,13 @@ function SnapshotButton({
   sessionId,
   containerId,
   containerName,
+  inline = false,
 }: {
   sessionId: string;
   containerId: string;
   containerName: string;
+  /** When true, renders as a plain inline button instead of absolute-positioned */
+  inline?: boolean;
 }) {
   const [saving, setSaving] = useState(false);
 
@@ -506,7 +765,11 @@ function SnapshotButton({
       onClick={(e) => { e.stopPropagation(); handleSnapshot(); }}
       disabled={saving}
       title="Snapshot archived logs to file"
-      className="absolute right-1 top-1 hidden rounded p-0.5 text-[10px] text-muted hover:text-accent group-hover/container:block disabled:opacity-40"
+      className={
+        inline
+          ? "rounded px-1.5 py-0.5 text-[10px] text-white/20 hover:text-white/50 transition-colors disabled:opacity-40"
+          : "absolute right-1 top-1 hidden rounded p-0.5 text-[10px] text-muted hover:text-accent group-hover/container:block disabled:opacity-40"
+      }
     >
       {saving ? "…" : "⬇"}
     </button>
@@ -1124,6 +1387,7 @@ function LogPane({
           {container.id.slice(0, 12)}
         </span>
         {container.status && <span className="text-muted">{container.status}</span>}
+
         <div className="ml-auto flex flex-wrap items-center gap-1.5">
           {/* Filter input */}
           <Input

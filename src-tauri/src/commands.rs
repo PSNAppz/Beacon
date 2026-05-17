@@ -2,7 +2,7 @@ use crate::archive::ArchiveState;
 use crate::error::{AppError, AppResult};
 use crate::ssh::{self, SessionManager, SshTestResult};
 use crate::ssh::docker::{Container, ContainerStats, LogLine, RemoteCmdResult};
-use crate::storage::{self, Category, Session, SessionInput, Vault, VaultState};
+use crate::storage::{self, Category, S3ConfigInput, S3ConfigPublic, Session, SessionInput, Vault, VaultState};
 use crate::transfer::{ImportPreview};
 use std::sync::Arc;
 use tauri::State;
@@ -263,3 +263,145 @@ pub fn change_vault_password(
     let v = guard.as_mut().ok_or(AppError::Locked)?;
     v.change_password(&old_password, &new_password)
 }
+
+// ─── Upgrade flows ────────────────────────────────────────────────────────────
+
+/// Get the single upgrade flow configured for a session, or null if none.
+#[tauri::command]
+pub fn get_upgrade_flow(
+    state: State<'_, VaultState>,
+    session_id: String,
+) -> AppResult<Option<storage::UpgradeFlow>> {
+    with_vault(&state, |v| storage::upgrades::get_for_session(v, &session_id))
+}
+
+#[tauri::command]
+pub fn save_upgrade_flow(
+    state: State<'_, VaultState>,
+    input: storage::UpgradeFlowInput,
+) -> AppResult<storage::UpgradeFlow> {
+    with_vault(&state, |v| storage::upgrades::upsert(v, input))
+}
+
+/// Delete the upgrade flow for a session.
+#[tauri::command]
+pub fn delete_upgrade_flow(
+    state: State<'_, VaultState>,
+    session_id: String,
+) -> AppResult<()> {
+    with_vault(&state, |v| storage::upgrades::delete(v, &session_id))
+}
+
+/// Trigger an upgrade flow run. Steps are passed directly so the user's
+/// pre-flight edits are used without being persisted back to the DB.
+#[tauri::command]
+pub async fn run_upgrade_flow(
+    app: tauri::AppHandle,
+    manager: State<'_, Arc<SessionManager>>,
+    session_id: String,
+    steps: Vec<String>,
+    run_id: String,
+) -> AppResult<()> {
+    let mgr = manager.inner().clone();
+    ssh::docker::run_upgrade_flow(app, mgr, session_id, steps, run_id).await
+}
+
+/// Send a line of text to the stdin of the currently-running upgrade step.
+#[tauri::command]
+pub fn send_upgrade_input(
+    manager: State<'_, Arc<SessionManager>>,
+    run_id: String,
+    text: String,
+) -> AppResult<()> {
+    manager.send_upgrade_input(&run_id, &text)
+}
+
+// ─── S3 log backup ────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn get_s3_config(state: State<'_, VaultState>) -> AppResult<Option<S3ConfigPublic>> {
+    with_vault(&state, |v| storage::s3_config::get_public(v))
+}
+
+#[tauri::command]
+pub fn save_s3_config(
+    state: State<'_, VaultState>,
+    input: S3ConfigInput,
+) -> AppResult<S3ConfigPublic> {
+    with_vault(&state, |v| storage::s3_config::upsert(v, input))
+}
+
+#[tauri::command]
+pub fn delete_s3_config(state: State<'_, VaultState>) -> AppResult<()> {
+    with_vault(&state, |v| storage::s3_config::delete(v))
+}
+
+fn extract_last_log_ts(log: &str) -> Option<&str> {
+    log.lines().rev().find_map(|line| {
+        let t = line.split_whitespace().next()?;
+        if t.contains('T') && t.ends_with('Z') { Some(t) } else { None }
+    })
+}
+
+fn extract_first_log_ts(log: &str) -> Option<&str> {
+    log.lines().find_map(|line| {
+        let t = line.split_whitespace().next()?;
+        if t.contains('T') && t.ends_with('Z') { Some(t) } else { None }
+    })
+}
+
+/// Fetch the complete log history of a container via SSH and upload it to S3.
+/// Called automatically just before a server upgrade.
+///
+/// Start and end timestamps are derived from the log content itself so the S3
+/// key always reflects the real log boundaries regardless of client or server clock.
+///
+/// Returns the S3 key that was written, or `"no-new-logs"` when the container has
+/// produced no timestamped output.
+#[tauri::command]
+pub async fn upload_container_logs_to_s3(
+    app: tauri::AppHandle,
+    manager: State<'_, Arc<SessionManager>>,
+    state: State<'_, VaultState>,
+    session_id: String,
+    container_id: String,
+    container_name: String,
+) -> AppResult<String> {
+    let vault = snapshot_vault(&state)?;
+
+    let s3_cfg = storage::s3_config::get(&vault)?
+        .ok_or_else(|| AppError::Other("S3 is not configured".into()))?;
+
+    let session = storage::sessions::get(&vault, &session_id)?;
+
+    let mgr = manager.inner().clone();
+
+    let logs =
+        ssh::docker::fetch_container_logs(&mgr, &session_id, &container_id, None).await?;
+
+    if logs.trim().is_empty() {
+        return Ok("no-new-logs".into());
+    }
+
+    let start_ts = extract_first_log_ts(&logs)
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let end_ts = extract_last_log_ts(&logs)
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let key = crate::s3::upload_logs(
+        app,
+        &s3_cfg,
+        &session.name,
+        &container_name,
+        &start_ts,
+        &end_ts,
+        logs,
+    )
+    .await?;
+
+    Ok(key)
+}
+

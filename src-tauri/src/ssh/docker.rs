@@ -284,6 +284,87 @@ pub async fn run_remote_command(
     })
 }
 
+/// Return the RFC3339 timestamp of when a container last started, via `docker inspect`.
+/// Used to anchor the start of the first S3 log upload window.
+pub async fn get_container_started_at(
+    manager: &SessionManager,
+    session_id: &str,
+    container_id: &str,
+) -> AppResult<String> {
+    if !is_safe_container_ref(container_id) {
+        return Err(AppError::Ssh("invalid container id".into()));
+    }
+    let conn = manager.require(session_id)?;
+    let mut ch = conn
+        .handle
+        .channel_open_session()
+        .await
+        .map_err(|e| AppError::Ssh(format!("open channel: {e}")))?;
+    let inner = format!("docker inspect {container_id} --format '{{{{.State.StartedAt}}}}'");
+    let cmd = wrap_command(&inner, conn.use_sudo);
+    ch.exec(true, cmd.as_str())
+        .await
+        .map_err(|e| AppError::Ssh(format!("exec docker inspect: {e}")))?;
+
+    let mut out = Vec::new();
+    loop {
+        match ch.wait().await {
+            Some(ChannelMsg::Data { ref data }) => out.extend_from_slice(data),
+            Some(ChannelMsg::ExtendedData { ref data, .. }) => out.extend_from_slice(data),
+            Some(ChannelMsg::Close) | None => break,
+            _ => {}
+        }
+    }
+    let started = String::from_utf8_lossy(&out).trim().to_string();
+    if started.is_empty() {
+        return Err(AppError::Ssh("docker inspect returned empty StartedAt".into()));
+    }
+    Ok(started)
+}
+
+/// Fetch logs from a container for S3 archiving.
+/// `since` is passed to `docker logs --since`; omitting it fetches from the beginning.
+/// No `--until` is used — the upper bound is always the live log tail, avoiding any
+/// client/server clock skew that would silently truncate the output.
+/// Unlike `run_remote_command`, there is no size cap.
+pub async fn fetch_container_logs(
+    manager: &SessionManager,
+    session_id: &str,
+    container_id: &str,
+    since: Option<&str>,
+) -> AppResult<String> {
+    if !is_safe_container_ref(container_id) {
+        return Err(AppError::Ssh("invalid container id".into()));
+    }
+    let conn = manager.require(session_id)?;
+    let mut ch = conn
+        .handle
+        .channel_open_session()
+        .await
+        .map_err(|e| AppError::Ssh(format!("open channel: {e}")))?;
+    let inner = match since {
+        Some(ts) => format!("docker logs --timestamps --since {ts} {container_id}"),
+        None => format!("docker logs --timestamps {container_id}"),
+    };
+    let cmd = wrap_command(&inner, conn.use_sudo);
+    ch.exec(true, cmd.as_str())
+        .await
+        .map_err(|e| AppError::Ssh(format!("exec docker logs: {e}")))?;
+
+    // docker logs writes to stderr; capture both stdout and stderr from the channel.
+    let mut output = Vec::new();
+    loop {
+        match ch.wait().await {
+            Some(ChannelMsg::Data { ref data }) => output.extend_from_slice(data),
+            Some(ChannelMsg::ExtendedData { ref data, .. }) => output.extend_from_slice(data),
+            Some(ChannelMsg::ExitStatus { .. }) | Some(ChannelMsg::Eof) => {}
+            Some(ChannelMsg::Close) | None => break,
+            _ => {}
+        }
+    }
+    Ok(String::from_utf8_lossy(&output).to_string())
+}
+
 pub async fn start_log_stream(
     app: AppHandle,
     manager: Arc<SessionManager>,
@@ -465,4 +546,230 @@ pub async fn poll_docker_stats(
         }
     }
     Ok(out)
+}
+
+// ─── Upgrade flow execution ───────────────────────────────────────────────────
+
+/// Events emitted to the frontend during an upgrade run.
+#[derive(Debug, Serialize, Clone)]
+pub struct UpgradeStepStart {
+    pub run_id: String,
+    pub step_index: usize,
+    pub command: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct UpgradeStepOutput {
+    pub run_id: String,
+    pub step_index: usize,
+    pub line: String,
+    pub is_stderr: bool,
+    /// True when the line looks like an interactive prompt (no trailing newline,
+    /// ends with `:` `?` or `]`). Hints the UI to highlight the input bar.
+    pub is_prompt: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct UpgradeStepDone {
+    pub run_id: String,
+    pub step_index: usize,
+    pub exit_code: u32,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct UpgradeComplete {
+    pub run_id: String,
+    pub success: bool,
+}
+
+/// Heuristic: does this partial (no-newline) output look like a prompt?
+fn looks_like_prompt(s: &str) -> bool {
+    let t = s.trim_end();
+    t.ends_with(':') || t.ends_with('?') || t.ends_with(']') || t.ends_with(')')
+}
+
+/// Heuristic: does this line look like a credential prompt?
+/// The UI uses this to decide whether to mask the input field.
+fn looks_like_credential_prompt(s: &str) -> bool {
+    let lower = s.to_lowercase();
+    lower.contains("password") || lower.contains("passphrase")
+        || lower.contains("token") || lower.contains("secret")
+        || lower.contains("username") || lower.contains("enter pin")
+}
+
+/// Run an upgrade flow: execute each step sequentially over an interactive SSH
+/// channel.  Steps run with a PTY allocated so that remote programs (e.g. git)
+/// don't suppress interactive prompts.  stdout/stderr are streamed as Tauri
+/// events. Stdin is kept open; callers use `send_upgrade_input` to write to it.
+///
+/// Returns when all steps complete or the first step fails.
+pub async fn run_upgrade_flow(
+    app: AppHandle,
+    manager: Arc<SessionManager>,
+    session_id: String,
+    steps: Vec<String>,
+    run_id: String,
+) -> AppResult<()> {
+    let conn_ref = manager.require(&session_id)?;
+
+    for (idx, step) in steps.iter().enumerate() {
+        // Each step is a fully self-contained shell command.
+        // Users include `cd /path && …` within the step itself.
+        let wrapped = wrap_command(step, conn_ref.use_sudo);
+
+        let _ = app.emit(
+            "upgrade:step-start",
+            UpgradeStepStart {
+                run_id: run_id.clone(),
+                step_index: idx,
+                command: step.clone(),
+            },
+        );
+
+        // Open a channel with PTY so programs know they're talking to a terminal.
+        let mut ch = conn_ref
+            .handle
+            .channel_open_session()
+            .await
+            .map_err(|e| AppError::Ssh(format!("upgrade: open channel: {e}")))?;
+
+        ch.request_pty(
+            false,
+            "xterm-256color",
+            80, 24, 0, 0,
+            &[], // no special terminal modes
+        )
+        .await
+        .map_err(|e| AppError::Ssh(format!("upgrade: request pty: {e}")))?;
+
+        ch.exec(true, wrapped.as_str())
+            .await
+            .map_err(|e| AppError::Ssh(format!("upgrade: exec: {e}")))?;
+
+        // Create an mpsc pipe so send_upgrade_input can push bytes to stdin
+        // without needing to hold the channel directly.
+        let (tx, mut rx) = crate::ssh::manager::stdin_pipe();
+        manager.register_upgrade_stdin(run_id.clone(), tx);
+
+        // Spawn a small task that forwards mpsc messages → channel stdin.
+        let mut ch_stdin = ch.make_writer();
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            while let Some(bytes) = rx.recv().await {
+                if ch_stdin.write_all(&bytes).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let mut stdout_buf: Vec<u8> = Vec::new();
+        let mut exit_code: u32 = 0;
+
+        loop {
+            match ch.wait().await {
+                Some(ChannelMsg::Data { ref data }) => {
+                    stdout_buf.extend_from_slice(data);
+                    // Drain complete lines
+                    while let Some(nl) = stdout_buf.iter().position(|&b| b == b'\n') {
+                        let raw: Vec<u8> = stdout_buf.drain(..=nl).collect();
+                        let text = String::from_utf8_lossy(&raw)
+                            .trim_end_matches(|c| c == '\n' || c == '\r')
+                            .to_string();
+                        let _ = app.emit(
+                            "upgrade:step-output",
+                            UpgradeStepOutput {
+                                run_id: run_id.clone(),
+                                step_index: idx,
+                                is_stderr: false,
+                                is_prompt: false,
+                                line: text,
+                            },
+                        );
+                    }
+                    // If remaining bytes look like a prompt (no newline yet),
+                    // emit them immediately so the user can respond.
+                    if !stdout_buf.is_empty() {
+                        let partial = String::from_utf8_lossy(&stdout_buf).to_string();
+                        if looks_like_prompt(&partial) {
+                            let _ = app.emit(
+                                "upgrade:step-output",
+                                UpgradeStepOutput {
+                                    run_id: run_id.clone(),
+                                    step_index: idx,
+                                    is_stderr: false,
+                                    is_prompt: looks_like_credential_prompt(&partial),
+                                    line: partial.clone(),
+                                },
+                            );
+                            stdout_buf.clear();
+                        }
+                    }
+                }
+                Some(ChannelMsg::ExtendedData { ref data, .. }) => {
+                    let text = String::from_utf8_lossy(data)
+                        .trim_end_matches(|c| c == '\n' || c == '\r')
+                        .to_string();
+                    if !text.is_empty() {
+                        let is_prompt = looks_like_prompt(&text);
+                        let _ = app.emit(
+                            "upgrade:step-output",
+                            UpgradeStepOutput {
+                                run_id: run_id.clone(),
+                                step_index: idx,
+                                is_stderr: true,
+                                is_prompt: is_prompt && looks_like_credential_prompt(&text),
+                                line: text,
+                            },
+                        );
+                    }
+                }
+                Some(ChannelMsg::ExitStatus { exit_status }) => {
+                    exit_code = exit_status;
+                }
+                Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                _ => {}
+            }
+        }
+
+        // Flush any remaining partial output.
+        if !stdout_buf.is_empty() {
+            let text = String::from_utf8_lossy(&stdout_buf).to_string();
+            let _ = app.emit(
+                "upgrade:step-output",
+                UpgradeStepOutput {
+                    run_id: run_id.clone(),
+                    step_index: idx,
+                    is_stderr: false,
+                    is_prompt: false,
+                    line: text,
+                },
+            );
+        }
+
+        // Unregister stdin now that the step is done.
+        manager.unregister_upgrade_stdin(&run_id);
+
+        let _ = app.emit(
+            "upgrade:step-done",
+            UpgradeStepDone {
+                run_id: run_id.clone(),
+                step_index: idx,
+                exit_code,
+            },
+        );
+
+        if exit_code != 0 {
+            let _ = app.emit(
+                "upgrade:complete",
+                UpgradeComplete { run_id: run_id.clone(), success: false },
+            );
+            return Ok(());
+        }
+    }
+
+    let _ = app.emit(
+        "upgrade:complete",
+        UpgradeComplete { run_id: run_id.clone(), success: true },
+    );
+    Ok(())
 }

@@ -199,3 +199,117 @@ export function errorMessage(e: unknown): string {
   if (e && typeof e === "object" && "message" in e) return String((e as { message: unknown }).message);
   return String(e);
 }
+
+// ─── Upgrade flows ────────────────────────────────────────────────────────────
+
+export interface UpgradeFlow {
+  id: string;
+  session_id: string;
+  label: string | null;
+  working_directory: string | null;
+  steps: string[];
+  created_at: number;
+  updated_at: number;
+}
+
+export interface UpgradeFlowInput {
+  id?: string;
+  session_id: string;
+  label: string | null;
+  working_directory: string | null;
+  steps: string[];
+}
+
+export interface UpgradeStepStart {
+  run_id: string;
+  step_index: number;
+  command: string;
+}
+
+export interface UpgradeStepOutput {
+  run_id: string;
+  step_index: number;
+  line: string;
+  is_stderr: boolean;
+  /** True when the output heuristically looks like a credential prompt. */
+  is_prompt: boolean;
+}
+
+export interface UpgradeStepDone {
+  run_id: string;
+  step_index: number;
+  exit_code: number;
+}
+
+export interface UpgradeComplete {
+  run_id: string;
+  success: boolean;
+}
+
+export const upgradeApi = {
+  getFlow: (sessionId: string) =>
+    invoke<UpgradeFlow | null>("get_upgrade_flow", { sessionId }),
+  saveFlow: (input: UpgradeFlowInput) =>
+    invoke<UpgradeFlow>("save_upgrade_flow", { input }),
+  deleteFlow: (sessionId: string) =>
+    invoke<void>("delete_upgrade_flow", { sessionId }),
+  runFlow: (params: {
+    sessionId: string;
+    steps: string[];
+    runId: string;
+  }) =>
+    invoke<void>("run_upgrade_flow", {
+      sessionId: params.sessionId,
+      steps: params.steps,
+      runId: params.runId,
+    }),
+  sendInput: (runId: string, text: string) =>
+    invoke<void>("send_upgrade_input", { runId, text }),
+};
+
+export function onUpgradeStepStart(cb: (e: UpgradeStepStart) => void): Promise<UnlistenFn> {
+  return listen<UpgradeStepStart>("upgrade:step-start", (e) => cb(e.payload));
+}
+
+export function onUpgradeStepOutput(cb: (e: UpgradeStepOutput) => void): Promise<UnlistenFn> {
+  return listen<UpgradeStepOutput>("upgrade:step-output", (e) => cb(e.payload));
+}
+
+export function onUpgradeStepDone(cb: (e: UpgradeStepDone) => void): Promise<UnlistenFn> {
+  return listen<UpgradeStepDone>("upgrade:step-done", (e) => cb(e.payload));
+}
+
+export function onUpgradeComplete(cb: (e: UpgradeComplete) => void): Promise<UnlistenFn> {
+  return listen<UpgradeComplete>("upgrade:complete", (e) => cb(e.payload));
+}
+
+// ─── S3 log backup ────────────────────────────────────────────────────────────
+
+export interface S3ConfigPublic {
+  bucket: string;
+  region: string;
+  aws_access_key_id: string;
+  has_secret: boolean;
+}
+
+export interface S3ConfigInput {
+  bucket: string;
+  region: string;
+  aws_access_key_id: string;
+  /** Plaintext secret. Pass null to keep existing value. */
+  aws_secret_key: string | null;
+}
+
+export const s3Api = {
+  getConfig: () => invoke<S3ConfigPublic | null>("get_s3_config"),
+  saveConfig: (input: S3ConfigInput) =>
+    invoke<S3ConfigPublic>("save_s3_config", { input }),
+  deleteConfig: () => invoke<void>("delete_s3_config"),
+  uploadLogs: (sessionId: string, containerId: string, containerName: string) =>
+    invoke<string>("upload_container_logs_to_s3", {
+      sessionId,
+      containerId,
+      containerName,
+    }),
+};
+
