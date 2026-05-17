@@ -226,12 +226,12 @@ The full plan lives in [`.claude/plans/`](https://claude.ai) in this repo's pare
 
 - [x] **Phase 1** — Bootstrap, theming, routing
 - [x] **Phase 2** — Vault (Argon2id + AEAD), SSH session CRUD, test connect, ProxyJump
-- [ ] **Phase 3** — Docker container listing + live log streaming + virtualized log pane
-- [ ] **Phase 4** — Workspace shell: tabs, splits, host tree, ⌘/Ctrl-K command palette, session restore
-- [ ] **Phase 5** — Embedded `xterm.js` terminal, container start/stop/restart/exec, audit log
-- [ ] **Phase 6** — Saved filters, highlight rules, JSON pretty-print, regex alerts → desktop notifications
-- [ ] **Phase 7** — `docker stats`, rolling log archive, time-range scrubber, two-stream diff, export
-- [ ] **Phase 8** — Auto-reconnect polish, known_hosts/TOFU prompt, signed installers via GitHub Actions
+- [x] **Phase 3** — Docker container listing + live log streaming + virtualized log pane
+- [x] **Phase 4** — Workspace shell: tabs, splits, host tree, ⌘/Ctrl-K command palette, session restore
+- [x] **Phase 5** — Embedded `xterm.js` terminal, container start/stop/restart/exec, audit log
+- [x] **Phase 6** — Saved filters, highlight rules, JSON pretty-print, regex alerts → desktop notifications
+- [x] **Phase 7** — `docker stats`, rolling log archive, time-range scrubber, two-stream diff, export
+- [x] **Phase 8** — Auto-reconnect polish, known_hosts/TOFU prompt, signed installers via GitHub Actions
 
 Post-MVP candidates: Kubernetes pods alongside `docker ps`, plugin/extension API, optional cloud-sync.
 
