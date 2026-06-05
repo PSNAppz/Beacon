@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { s3Api, S3ConfigInput, S3ConfigPublic, errorMessage } from "../../lib/ipc";
+import { s3Api, S3ConfigInput, errorMessage } from "../../lib/ipc";
 import { useApp } from "../../lib/store";
 import { Button, Field, Input } from "../../components/ui";
 

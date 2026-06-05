@@ -4,6 +4,7 @@ import {
   onUpgradeStepOutput,
   onUpgradeStepDone,
   onUpgradeComplete,
+  upgradeApi,
   UpgradeStepOutput,
 } from "../../lib/ipc";
 
