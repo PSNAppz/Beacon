@@ -32,6 +32,14 @@ export interface Session {
   aws_profile: string | null;
   aws_access_key_id: string | null;
   has_aws_secret: boolean;
+  ssm_target_kind: "instance" | "tags" | "asg";
+  ssm_tag_filters: string | null;
+  ssm_asg_name: string | null;
+}
+
+export interface SsmTagFilter {
+  key: string;
+  value: string;
 }
 
 export interface SessionInput {
@@ -56,6 +64,14 @@ export interface SessionInput {
   aws_access_key_id: string | null;
   /** Pass null to leave existing unchanged (edit). Pass "" to clear. */
   aws_secret_access_key: string | null;
+  ssm_target_kind: "instance" | "tags" | "asg";
+  /** JSON-encoded array of {key, value} pairs, or null. */
+  ssm_tag_filters: string | null;
+  ssm_asg_name: string | null;
+}
+
+export interface ExportSummary {
+  warnings: string[];
 }
 
 export interface SshTestResult {
@@ -155,8 +171,18 @@ export const api = {
   deleteCategory: (id: string) => invoke<void>("delete_category", { id }),
   snapshotContainerLogs: (sessionId: string, containerId: string, path: string) =>
     invoke<void>("snapshot_container_logs", { sessionId, containerId, path }),
-  exportSessions: (ids: string[], password: string, path: string) =>
-    invoke<void>("export_sessions", { ids, password, path }),
+  exportSessions: (
+    ids: string[],
+    password: string,
+    path: string,
+    includeKeys = false,
+  ) =>
+    invoke<ExportSummary>("export_sessions", {
+      ids,
+      password,
+      path,
+      includeKeys,
+    }),
   previewImport: (path: string, password: string) =>
     invoke<ImportPreview>("preview_import", { path, password }),
   importSessions: (
@@ -192,6 +218,17 @@ export function onLogBatch(cb: (b: LogBatch) => void): Promise<UnlistenFn> {
 
 export function onLogEnd(cb: (e: LogEnd) => void): Promise<UnlistenFn> {
   return listen<LogEnd>("log:end", (e) => cb(e.payload));
+}
+
+export interface SessionDisconnected {
+  session_id: string;
+  reason: string;
+}
+
+export function onSessionDisconnected(
+  cb: (e: SessionDisconnected) => void,
+): Promise<UnlistenFn> {
+  return listen<SessionDisconnected>("session:disconnected", (e) => cb(e.payload));
 }
 
 export function errorMessage(e: unknown): string {

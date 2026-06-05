@@ -371,6 +371,56 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-autoscaling"
+version = "1.115.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70ba1d752ca449e9d3dfcd62c580033abae6e6cadd6e066059a0a8ebe0394abd"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-query",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-smithy-xml",
+ "aws-types",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
+name = "aws-sdk-ec2"
+version = "1.226.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27ef215366676d2392accd5a5f964e891f7a97d210b34ccabe775510ccfd0302"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-query",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-smithy-xml",
+ "aws-types",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-s3"
 version = "1.132.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -815,6 +865,8 @@ dependencies = [
  "argon2",
  "async-trait",
  "aws-config",
+ "aws-sdk-autoscaling",
+ "aws-sdk-ec2",
  "aws-sdk-s3",
  "aws-sdk-ssm",
  "base64 0.22.1",

@@ -37,8 +37,12 @@ pub struct SshTestResult {
 
 fn cfg() -> Arc<Config> {
     Arc::new(Config {
-        inactivity_timeout: Some(Duration::from_secs(20)), // debug: short timeout
+        // Long inactivity ceiling so idle workspaces survive without manual reconnects.
+        // We rely on the keepalive ping below (every 30s, drop after 3 missed) and an
+        // application-level heartbeat (manager.rs) to detect real failures.
+        inactivity_timeout: Some(Duration::from_secs(300)),
         keepalive_interval: Some(Duration::from_secs(30)),
+        keepalive_max: 3,
         ..Default::default()
     })
 }
@@ -98,16 +102,22 @@ pub struct DialResult {
 /// Calls `ssm:StartSession`, opens a WebSocket datachannel, and uses it as
 /// the SSH transport so no public IP or open port 22 is needed on the instance.
 async fn dial_ssm(vault: &Vault, session: &Session) -> AppResult<DialResult> {
-    let instance_id = session.ssm_instance_id.as_deref()
-        .ok_or_else(|| AppError::Ssh("SSM instance ID is required".into()))?;
     let region = session.aws_region.as_deref()
         .ok_or_else(|| AppError::Ssh("AWS region is required for SSM sessions".into()))?;
 
     let aws = crate::storage::sessions::read_aws_secret(vault, &session.id)?;
 
+    // For auto-scaling fleets, resolve the live instance ID at connect time
+    // instead of trusting the saved value.
+    let instance_id = crate::ssh::ssm_resolver::resolve_instance_id(
+        session,
+        aws.secret_access_key.as_deref(),
+    )
+    .await?;
+
     let stream = crate::ssh::ssm_channel::open_ssm_stream(
         region,
-        instance_id,
+        &instance_id,
         session.port,
         session.aws_access_key_id.as_deref(),
         aws.secret_access_key.as_deref(),

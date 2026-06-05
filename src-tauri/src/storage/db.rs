@@ -114,6 +114,13 @@ impl Vault {
             ("aws_profile", "TEXT"),
             ("aws_access_key_id", "TEXT"),
             ("aws_secret_b64", "TEXT"),
+            // SSM target resolution for auto-scaling fleets.
+            // kind: "instance" (default), "tags", or "asg"
+            ("ssm_target_kind", "TEXT NOT NULL DEFAULT 'instance'"),
+            // JSON array of {key, value} objects, used when kind = "tags"
+            ("ssm_tag_filters", "TEXT"),
+            // Auto Scaling Group name, used when kind = "asg"
+            ("ssm_asg_name", "TEXT"),
         ] {
             let has: bool = conn
                 .query_row(

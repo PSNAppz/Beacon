@@ -55,6 +55,12 @@ pub struct Session {
     pub aws_profile: Option<String>,
     pub aws_access_key_id: Option<String>,
     pub has_aws_secret: bool,
+    /// "instance" | "tags" | "asg" — how to find the live instance ID at connect time.
+    pub ssm_target_kind: String,
+    /// JSON array of {key, value} pairs, used when ssm_target_kind = "tags".
+    pub ssm_tag_filters: Option<String>,
+    /// Auto Scaling Group name, used when ssm_target_kind = "asg".
+    pub ssm_asg_name: Option<String>,
 }
 
 /// Input from the UI for create / update.
@@ -83,7 +89,13 @@ pub struct SessionInput {
     pub aws_access_key_id: Option<String>,
     /// Plaintext AWS secret access key. None = leave existing, Some("") = clear.
     pub aws_secret_access_key: Option<String>,
+    #[serde(default = "default_target_kind")]
+    pub ssm_target_kind: String,
+    pub ssm_tag_filters: Option<String>,
+    pub ssm_asg_name: Option<String>,
 }
+
+fn default_target_kind() -> String { "instance".into() }
 
 /// Decrypted secret material for actually connecting.
 #[derive(Debug, Clone)]
@@ -115,13 +127,20 @@ fn row_to_session(r: &Row<'_>) -> rusqlite::Result<Session> {
         aws_profile: r.get(19).unwrap_or(None),
         aws_access_key_id: r.get(20).unwrap_or(None),
         has_aws_secret: r.get::<_, Option<String>>(21).unwrap_or(None).is_some(),
+        ssm_target_kind: r
+            .get::<_, Option<String>>(22)
+            .unwrap_or(None)
+            .unwrap_or_else(|| "instance".into()),
+        ssm_tag_filters: r.get(23).unwrap_or(None),
+        ssm_asg_name: r.get(24).unwrap_or(None),
     })
 }
 
 const SELECT_COLS: &str = "id, name, host, port, username, auth_kind, key_path, secret_b64, \
                            jump_session_id, color, read_only, last_connected, created_at, updated_at, \
                            use_sudo, category_id, use_ssm, ssm_instance_id, aws_region, aws_profile, \
-                           aws_access_key_id, aws_secret_b64";
+                           aws_access_key_id, aws_secret_b64, \
+                           ssm_target_kind, ssm_tag_filters, ssm_asg_name";
 
 pub fn list(vault: &Vault) -> AppResult<Vec<Session>> {
     let conn = vault.conn.lock();
@@ -179,9 +198,9 @@ pub fn upsert(vault: &Vault, input: SessionInput) -> AppResult<Session> {
         "INSERT INTO sessions (id, name, host, port, username, auth_kind, key_path, secret_b64, \
             jump_session_id, color, read_only, last_connected, created_at, updated_at, use_sudo, \
             category_id, use_ssm, ssm_instance_id, aws_region, aws_profile, \
-            aws_access_key_id, aws_secret_b64) \
+            aws_access_key_id, aws_secret_b64, ssm_target_kind, ssm_tag_filters, ssm_asg_name) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12, ?12, ?13, \
-                 ?14, ?15, ?16, ?17, ?18, ?19, ?20) \
+                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23) \
          ON CONFLICT(id) DO UPDATE SET \
             name=excluded.name, host=excluded.host, port=excluded.port, \
             username=excluded.username, auth_kind=excluded.auth_kind, \
@@ -191,7 +210,10 @@ pub fn upsert(vault: &Vault, input: SessionInput) -> AppResult<Session> {
             category_id=excluded.category_id, use_ssm=excluded.use_ssm, \
             ssm_instance_id=excluded.ssm_instance_id, aws_region=excluded.aws_region, \
             aws_profile=excluded.aws_profile, aws_access_key_id=excluded.aws_access_key_id, \
-            aws_secret_b64=excluded.aws_secret_b64, updated_at=excluded.updated_at",
+            aws_secret_b64=excluded.aws_secret_b64, updated_at=excluded.updated_at, \
+            ssm_target_kind=excluded.ssm_target_kind, \
+            ssm_tag_filters=excluded.ssm_tag_filters, \
+            ssm_asg_name=excluded.ssm_asg_name",
         params![
             id, input.name, input.host, input.port as i64, input.username,
             input.auth_kind.as_str(), input.key_path, secret_b64,
@@ -199,6 +221,7 @@ pub fn upsert(vault: &Vault, input: SessionInput) -> AppResult<Session> {
             input.use_sudo as i64, input.category_id,
             input.use_ssm as i64, input.ssm_instance_id, input.aws_region, input.aws_profile,
             input.aws_access_key_id, aws_secret_b64,
+            input.ssm_target_kind, input.ssm_tag_filters, input.ssm_asg_name,
         ],
     )?;
     drop(conn);

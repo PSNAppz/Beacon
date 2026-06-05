@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { api, errorMessage, type Container } from "./ipc";
+import { api, errorMessage, onSessionDisconnected, type Container } from "./ipc";
 import { toast } from "./toastStore";
 
 export type ConnState = "idle" | "connecting" | "connected" | "error";
@@ -75,6 +75,9 @@ export interface WorkspaceStore {
   setActiveTab: (tabId: string) => void;
   setSplitTab: (tabId: string | null) => void;
   markStorageRestored: () => void;
+  /** Called when the user enters a workspace tab. If the session isn't
+   *  connected, fire an immediate reconnect (resets backoff). */
+  touchSession: (sessionId: string) => void;
 }
 
 export const useWorkspace = create<WorkspaceStore>((set, get) => ({
@@ -237,4 +240,31 @@ export const useWorkspace = create<WorkspaceStore>((set, get) => ({
     if (tabId === activeTabId) return;
     set({ splitTabId: tabId });
   },
+
+  touchSession(sessionId) {
+    const state = get().connState[sessionId] ?? "idle";
+    if (state === "connected" || state === "connecting") return;
+    // User just focused a tab for this session — drop the backoff floor and
+    // reconnect now instead of waiting out the timer.
+    cancelReconnect(sessionId);
+    set((s) => ({ reconnectAttempts: { ...s.reconnectAttempts, [sessionId]: 0 } }));
+    get().connect(sessionId);
+  },
 }));
+
+// Backend heartbeat detected a dead connection — immediately flip into error
+// state and schedule a reconnect. The handler is wired once at module load;
+// `listen` returns an unlisten fn that we intentionally don't call (the
+// subscription lives for the lifetime of the app).
+onSessionDisconnected((e) => {
+  const store = useWorkspace.getState();
+  if (!store.tabs.some((t) => t.sessionId === e.session_id)) return;
+  const attempt = store.reconnectAttempts[e.session_id] ?? 0;
+  useWorkspace.setState((s) => ({
+    connState: { ...s.connState, [e.session_id]: "error" },
+    connError: { ...s.connError, [e.session_id]: e.reason },
+    reconnectAttempts: { ...s.reconnectAttempts, [e.session_id]: attempt + 1 },
+  }));
+  if (attempt === 0) toast("error", `Connection lost: ${e.reason}`);
+  scheduleReconnect(e.session_id, attempt);
+}).catch(() => {});

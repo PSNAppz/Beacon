@@ -3,6 +3,7 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { api, errorMessage, Session } from "../../lib/ipc";
 import { useApp } from "../../lib/store";
 import { Button, Field, Input, Modal } from "../../components/ui";
+import { toast } from "../../lib/toastStore";
 
 export function ExportModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const sessions = useApp((s) => s.sessions);
@@ -10,6 +11,7 @@ export function ExportModal({ open, onClose }: { open: boolean; onClose: () => v
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [password, setPassword] = useState("");
+  const [includeKeys, setIncludeKeys] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -18,10 +20,16 @@ export function ExportModal({ open, onClose }: { open: boolean; onClose: () => v
     if (open) {
       setSelected(new Set(sessions.map((s) => s.id)));
       setPassword("");
+      setIncludeKeys(false);
       setErr(null);
       setBusy(false);
     }
   }, [open, sessions]);
+
+  const selectedHasKeyAuth = useMemo(
+    () => sessions.some((s) => selected.has(s.id) && s.auth_kind === "key"),
+    [sessions, selected],
+  );
 
   const groups = useMemo(() => {
     const result: { label: string | null; sessions: Session[] }[] = [];
@@ -68,7 +76,13 @@ export function ExportModal({ open, onClose }: { open: boolean; onClose: () => v
     if (!path) return; // user cancelled dialog
     setBusy(true);
     try {
-      await api.exportSessions([...selected], password, path);
+      const summary = await api.exportSessions(
+        [...selected],
+        password,
+        path,
+        includeKeys,
+      );
+      for (const w of summary.warnings ?? []) toast("info", w);
       onClose();
     } catch (e) {
       setErr(errorMessage(e));
@@ -156,6 +170,23 @@ export function ExportModal({ open, onClose }: { open: boolean; onClose: () => v
             autoFocus
           />
         </Field>
+
+        <label className="flex items-start gap-3 rounded-lg border border-border bg-surface-2 px-3 py-2">
+          <input
+            type="checkbox"
+            checked={includeKeys}
+            onChange={(e) => setIncludeKeys(e.target.checked)}
+            className="mt-0.5 h-4 w-4 accent-accent"
+          />
+          <div>
+            <div className="text-sm font-medium">Include private key files</div>
+            <div className="text-xs text-muted">
+              {selectedHasKeyAuth
+                ? "PEM file contents are embedded inside the encrypted bundle and restored on import."
+                : "None of the selected sessions use key auth — this option has no effect."}
+            </div>
+          </div>
+        </label>
 
         {err && <p className="text-sm text-danger">{err}</p>}
       </div>

@@ -7,9 +7,12 @@ use crate::ssh::client::{dial, AcceptAllHandler};
 use crate::storage::Vault;
 use parking_lot::Mutex;
 use russh::client::Handle;
-use russh::Disconnect;
+use russh::{ChannelMsg, Disconnect};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
+use tauri::{AppHandle, Emitter};
 use tokio::process::Child;
 use tokio::task::JoinHandle;
 
@@ -30,9 +33,16 @@ pub fn stdin_pipe() -> (StdinTx, StdinRx) {
     tokio::sync::mpsc::unbounded_channel()
 }
 
+#[derive(Serialize, Clone)]
+struct SessionDisconnected {
+    session_id: String,
+    reason: String,
+}
+
 pub struct SessionManager {
     sessions: Mutex<HashMap<String, Arc<ConnectedSession>>>,
     streams: Mutex<HashMap<String, JoinHandle<()>>>,
+    heartbeats: Mutex<HashMap<String, JoinHandle<()>>>,
     /// Maps upgrade run_id → stdin sender for the currently-running step.
     upgrade_inputs: Mutex<HashMap<String, StdinTx>>,
 }
@@ -42,11 +52,17 @@ impl SessionManager {
         Self {
             sessions: Mutex::new(HashMap::new()),
             streams: Mutex::new(HashMap::new()),
+            heartbeats: Mutex::new(HashMap::new()),
             upgrade_inputs: Mutex::new(HashMap::new()),
         }
     }
 
-    pub async fn connect(&self, vault: &Vault, session_id: &str) -> AppResult<()> {
+    pub async fn connect(
+        self: &Arc<Self>,
+        app: AppHandle,
+        vault: &Vault,
+        session_id: &str,
+    ) -> AppResult<()> {
         if self.sessions.lock().contains_key(session_id) {
             return Ok(());
         }
@@ -58,9 +74,75 @@ impl SessionManager {
             _jump: r.jump,
             _ssm_child: r.ssm_child,
         });
-        self.sessions.lock().insert(session_id.to_string(), entry);
+        self.sessions.lock().insert(session_id.to_string(), entry.clone());
         crate::storage::sessions::touch_last_connected(vault, session_id)?;
+
+        // Spawn the application-level heartbeat. Re-uses the existing channel-open
+        // path so NAT/firewall idle timers see real traffic, not just SSH keepalives.
+        self.spawn_heartbeat(app, session_id.to_string(), entry);
         Ok(())
+    }
+
+    fn spawn_heartbeat(
+        self: &Arc<Self>,
+        app: AppHandle,
+        session_id: String,
+        entry: Arc<ConnectedSession>,
+    ) {
+        let mgr = Arc::clone(self);
+        let key = session_id.clone();
+        let handle = tokio::spawn(async move {
+            const INTERVAL: Duration = Duration::from_secs(60);
+            // Brief warm-up so initial container fetches don't race the first ping.
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            loop {
+                // If the session has been removed from the registry, exit quietly.
+                if !mgr.is_connected(&session_id) {
+                    return;
+                }
+                let res = tokio::time::timeout(
+                    Duration::from_secs(15),
+                    heartbeat_ping(&entry),
+                )
+                .await;
+                let ok = matches!(res, Ok(Ok(_)));
+                if !ok {
+                    let reason = match res {
+                        Err(_) => "heartbeat timeout".to_string(),
+                        Ok(Err(e)) => format!("heartbeat error: {e}"),
+                        Ok(Ok(_)) => unreachable!(),
+                    };
+                    mgr.on_heartbeat_failure(&app, &session_id, reason).await;
+                    return;
+                }
+                tokio::time::sleep(INTERVAL).await;
+            }
+        });
+        self.heartbeats.lock().insert(key, handle);
+    }
+
+    async fn on_heartbeat_failure(&self, app: &AppHandle, session_id: &str, reason: String) {
+        // Tear down the connection registry entry without aborting our own task.
+        let entry = self.sessions.lock().remove(session_id);
+        self.heartbeats.lock().remove(session_id);
+        if let Some(entry) = entry {
+            if let Some(mut conn) = Arc::into_inner(entry) {
+                let _ = conn
+                    .handle
+                    .disconnect(Disconnect::ByApplication, "bye", "en")
+                    .await;
+                if let Some(ref mut child) = conn._ssm_child {
+                    let _ = child.start_kill();
+                }
+            }
+        }
+        let _ = app.emit(
+            "session:disconnected",
+            SessionDisconnected {
+                session_id: session_id.to_string(),
+                reason,
+            },
+        );
     }
 
     pub fn is_connected(&self, session_id: &str) -> bool {
@@ -73,6 +155,9 @@ impl SessionManager {
 
     pub async fn disconnect(&self, session_id: &str) -> AppResult<()> {
         let entry = self.sessions.lock().remove(session_id);
+        if let Some(hb) = self.heartbeats.lock().remove(session_id) {
+            hb.abort();
+        }
         if let Some(entry) = entry {
             if let Some(mut conn) = Arc::into_inner(entry) {
                 let _ = conn
@@ -134,6 +219,25 @@ impl SessionManager {
         tx.send(bytes)
             .map_err(|_| AppError::Ssh("upgrade: stdin channel closed".into()))
     }
+}
+
+async fn heartbeat_ping(entry: &ConnectedSession) -> AppResult<()> {
+    let mut ch = entry
+        .handle
+        .channel_open_session()
+        .await
+        .map_err(|e| AppError::Ssh(format!("heartbeat open channel: {e}")))?;
+    ch.exec(true, "echo bcn-hb")
+        .await
+        .map_err(|e| AppError::Ssh(format!("heartbeat exec: {e}")))?;
+    while let Some(msg) = ch.wait().await {
+        match msg {
+            ChannelMsg::ExitStatus { .. } => {}
+            ChannelMsg::Eof | ChannelMsg::Close => break,
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 impl Default for SessionManager {

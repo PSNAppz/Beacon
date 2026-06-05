@@ -173,6 +173,14 @@ export function WorkspacePage() {
 
   // Sessions are kept alive across navigation — vault lock (via store.ts) disconnects them.
 
+  // When the user focuses a tab, tell the store so it can immediately reconnect
+  // if the session was sitting in `error` waiting on a backoff timer.
+  useEffect(() => {
+    if (!ws.activeTabId) return;
+    const tab = ws.tabs.find((t) => t.id === ws.activeTabId);
+    if (tab) ws.touchSession(tab.sessionId);
+  }, [ws.activeTabId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const activeTab = ws.tabs.find((t) => t.id === ws.activeTabId);
   const splitTab = ws.splitTabId ? ws.tabs.find((t) => t.id === ws.splitTabId) : null;
 
