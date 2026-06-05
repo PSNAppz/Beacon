@@ -30,7 +30,13 @@ export function SessionWizard({ open: isOpen, onClose, editing }: Props) {
   const [useSudo, setUseSudo] = useState(false);
   const [categoryId, setCategoryId] = useState<string>("");
   const [useSsm, setUseSsm] = useState(false);
+  const [ssmTargetKind, setSsmTargetKind] =
+    useState<"instance" | "tags" | "asg">("instance");
   const [ssmInstanceId, setSsmInstanceId] = useState("");
+  const [ssmTagFilters, setSsmTagFilters] = useState<{ key: string; value: string }[]>([
+    { key: "", value: "" },
+  ]);
+  const [ssmAsgName, setSsmAsgName] = useState("");
   const [awsRegion, setAwsRegion] = useState("");
   const [awsProfile, setAwsProfile] = useState("");
   const [awsAccessKeyId, setAwsAccessKeyId] = useState("");
@@ -54,7 +60,17 @@ export function SessionWizard({ open: isOpen, onClose, editing }: Props) {
       setUseSudo(editing.use_sudo);
       setCategoryId(editing.category_id ?? "");
       setUseSsm(editing.use_ssm);
+      setSsmTargetKind(editing.ssm_target_kind ?? "instance");
       setSsmInstanceId(editing.ssm_instance_id ?? "");
+      setSsmAsgName(editing.ssm_asg_name ?? "");
+      try {
+        const parsed = editing.ssm_tag_filters
+          ? (JSON.parse(editing.ssm_tag_filters) as { key: string; value: string }[])
+          : [];
+        setSsmTagFilters(parsed.length ? parsed : [{ key: "", value: "" }]);
+      } catch {
+        setSsmTagFilters([{ key: "", value: "" }]);
+      }
       setAwsRegion(editing.aws_region ?? "");
       setAwsProfile(editing.aws_profile ?? "");
       setAwsAccessKeyId(editing.aws_access_key_id ?? "");
@@ -63,7 +79,9 @@ export function SessionWizard({ open: isOpen, onClose, editing }: Props) {
       setName(""); setHost(""); setPort(22); setUsername("");
       setAuthKind("key"); setKeyPath(""); setSecret(""); setJumpId("");
       setColor(DEFAULT_COLORS[0]); setReadOnly(false); setUseSudo(false);
-      setCategoryId(""); setUseSsm(false); setSsmInstanceId("");
+      setCategoryId(""); setUseSsm(false);
+      setSsmTargetKind("instance"); setSsmInstanceId("");
+      setSsmTagFilters([{ key: "", value: "" }]); setSsmAsgName("");
       setAwsRegion(""); setAwsProfile(""); setAwsAccessKeyId(""); setAwsSecretAccessKey("");
     }
     setErr(null);
@@ -83,8 +101,17 @@ export function SessionWizard({ open: isOpen, onClose, editing }: Props) {
     setErr(null);
     if (!name || !username) { setErr("Name and username are required."); return; }
     if (!useSsm && !host) { setErr("Host is required for non-SSM sessions."); return; }
-    if (useSsm && !ssmInstanceId) { setErr("SSM instance ID is required."); return; }
     if (useSsm && !awsRegion) { setErr("AWS region is required for SSM sessions."); return; }
+    if (useSsm && ssmTargetKind === "instance" && !ssmInstanceId) {
+      setErr("SSM instance ID is required."); return;
+    }
+    const cleanedTagFilters = ssmTagFilters.filter((t) => t.key.trim() && t.value.trim());
+    if (useSsm && ssmTargetKind === "tags" && cleanedTagFilters.length === 0) {
+      setErr("At least one tag filter (key + value) is required."); return;
+    }
+    if (useSsm && ssmTargetKind === "asg" && !ssmAsgName) {
+      setErr("Auto Scaling Group name is required."); return;
+    }
     if (useSsm && awsAccessKeyId && !awsSecretAccessKey && !editing?.has_aws_secret) {
       setErr("AWS secret access key is required when specifying an access key ID."); return;
     }
@@ -105,11 +132,19 @@ export function SessionWizard({ open: isOpen, onClose, editing }: Props) {
       use_sudo: useSudo,
       category_id: categoryId || null,
       use_ssm: useSsm,
-      ssm_instance_id: useSsm ? (ssmInstanceId || null) : null,
+      ssm_instance_id:
+        useSsm && ssmTargetKind === "instance" ? (ssmInstanceId || null) : null,
       aws_region: useSsm ? (awsRegion || null) : null,
       aws_profile: useSsm ? (awsProfile || null) : null,
       aws_access_key_id: useSsm ? (awsAccessKeyId || null) : null,
       aws_secret_access_key: useSsm ? (awsSecretAccessKey || null) : null,
+      ssm_target_kind: useSsm ? ssmTargetKind : "instance",
+      ssm_tag_filters:
+        useSsm && ssmTargetKind === "tags"
+          ? JSON.stringify(cleanedTagFilters)
+          : null,
+      ssm_asg_name:
+        useSsm && ssmTargetKind === "asg" ? (ssmAsgName || null) : null,
     };
 
     setBusy(true);
@@ -160,16 +195,97 @@ export function SessionWizard({ open: isOpen, onClose, editing }: Props) {
           <div>
             <div className="text-sm font-medium">Connect via AWS SSM</div>
             <div className="text-xs text-muted">
-              No public IP needed. Requires <code className="font-mono text-fg">aws</code> CLI and SSM agent on the instance.
+              No public IP needed. Requires SSM Agent on the instance and AWS credentials for ssm:StartSession (plus ec2:DescribeInstances or autoscaling:DescribeAutoScalingGroups for tag/ASG targets).
             </div>
           </div>
         </label>
 
         {useSsm ? (
           <>
-            <Field label="Instance ID">
-              <Input value={ssmInstanceId} onChange={(e) => setSsmInstanceId(e.target.value)} placeholder="i-0abc1234def56789a" />
+            <Field label="Target">
+              <div className="flex gap-2 rounded-lg border border-border bg-surface-2 p-1 text-xs">
+                {([
+                  ["instance", "Instance ID"],
+                  ["tags", "Tag filters"],
+                  ["asg", "Auto Scaling Group"],
+                ] as const).map(([k, label]) => (
+                  <button
+                    key={k}
+                    type="button"
+                    onClick={() => setSsmTargetKind(k)}
+                    className={`flex-1 rounded-md px-2 py-1.5 transition ${
+                      ssmTargetKind === k
+                        ? "bg-accent/20 text-accent"
+                        : "text-muted hover:text-fg"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
             </Field>
+
+            {ssmTargetKind === "instance" && (
+              <Field label="Instance ID">
+                <Input value={ssmInstanceId} onChange={(e) => setSsmInstanceId(e.target.value)} placeholder="i-0abc1234def56789a" />
+              </Field>
+            )}
+
+            {ssmTargetKind === "tags" && (
+              <Field label="Tag filters" hint="Beacon picks the first running instance matching ALL filters">
+                <div className="space-y-2">
+                  {ssmTagFilters.map((t, i) => (
+                    <div key={i} className="grid grid-cols-[1fr_1fr_auto] gap-2">
+                      <Input
+                        value={t.key}
+                        onChange={(e) => {
+                          const next = [...ssmTagFilters];
+                          next[i] = { ...next[i], key: e.target.value };
+                          setSsmTagFilters(next);
+                        }}
+                        placeholder="Name"
+                      />
+                      <Input
+                        value={t.value}
+                        onChange={(e) => {
+                          const next = [...ssmTagFilters];
+                          next[i] = { ...next[i], value: e.target.value };
+                          setSsmTagFilters(next);
+                        }}
+                        placeholder="web-prod"
+                      />
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        onClick={() =>
+                          setSsmTagFilters(
+                            ssmTagFilters.length > 1
+                              ? ssmTagFilters.filter((_, j) => j !== i)
+                              : [{ key: "", value: "" }],
+                          )
+                        }
+                      >
+                        ✕
+                      </Button>
+                    </div>
+                  ))}
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={() => setSsmTagFilters([...ssmTagFilters, { key: "", value: "" }])}
+                  >
+                    + Add tag
+                  </Button>
+                </div>
+              </Field>
+            )}
+
+            {ssmTargetKind === "asg" && (
+              <Field label="Auto Scaling Group name">
+                <Input value={ssmAsgName} onChange={(e) => setSsmAsgName(e.target.value)} placeholder="web-prod-asg" />
+              </Field>
+            )}
+
             <div className="grid grid-cols-2 gap-4">
               <Field label="AWS Region">
                 <Input value={awsRegion} onChange={(e) => setAwsRegion(e.target.value)} placeholder="us-east-1" />

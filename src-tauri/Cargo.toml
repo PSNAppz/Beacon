@@ -41,6 +41,8 @@ russh-keys = "0.45"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-ssm = "1"
 aws-sdk-s3 = "1"
+aws-sdk-ec2 = "1"
+aws-sdk-autoscaling = "1"
 tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 futures = "0.3"
 sha2 = "0.10"

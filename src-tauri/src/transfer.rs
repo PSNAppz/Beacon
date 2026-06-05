@@ -58,7 +58,17 @@ struct ExportSession {
     aws_profile: Option<String>,
     aws_access_key_id: Option<String>,
     aws_secret_access_key: Option<String>,
+    #[serde(default = "default_target_kind_export")]
+    ssm_target_kind: String,
+    #[serde(default)]
+    ssm_tag_filters: Option<String>,
+    #[serde(default)]
+    ssm_asg_name: Option<String>,
+    #[serde(default)]
+    key_pem: Option<String>,
 }
+
+fn default_target_kind_export() -> String { "instance".into() }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ExportUpgradeFlow {
@@ -128,9 +138,16 @@ fn parse_bcnx(data: &str, password: &str) -> AppResult<BcnxPayload> {
 
 /// Collect the requested sessions (with decrypted secrets), encrypt them with
 /// `password`, and write the result to `path`.
-pub fn export_sessions(vault: &Vault, ids: &[String], password: &str, path: &str) -> AppResult<()> {
+pub fn export_sessions(
+    vault: &Vault,
+    ids: &[String],
+    password: &str,
+    path: &str,
+    include_keys: bool,
+) -> AppResult<ExportSummary> {
     let mut sessions_out: Vec<ExportSession> = Vec::new();
     let mut cat_ids: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
 
     for id in ids {
         let s = crate::storage::sessions::get(vault, id)?;
@@ -146,6 +163,29 @@ pub fn export_sessions(vault: &Vault, ids: &[String], password: &str, path: &str
                 cat_ids.push(cid.clone());
             }
         }
+
+        // Optionally embed the on-disk PEM contents. The bundle is encrypted as
+        // a whole, so raw base64 of the file bytes is enough — no extra wrap.
+        let key_pem = if include_keys
+            && s.auth_kind == AuthKind::Key
+            && s.key_path.as_ref().map(|p| !p.is_empty()).unwrap_or(false)
+        {
+            let path = s.key_path.as_deref().unwrap();
+            match std::fs::read(path) {
+                Ok(bytes) => Some(
+                    base64::engine::general_purpose::STANDARD.encode(bytes),
+                ),
+                Err(e) => {
+                    warnings.push(format!(
+                        "{}: could not read key file {}: {}",
+                        s.name, path, e
+                    ));
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         sessions_out.push(ExportSession {
             id: s.id,
@@ -167,6 +207,10 @@ pub fn export_sessions(vault: &Vault, ids: &[String], password: &str, path: &str
             aws_profile: s.aws_profile,
             aws_access_key_id: s.aws_access_key_id,
             aws_secret_access_key: aws.secret_access_key,
+            ssm_target_kind: s.ssm_target_kind,
+            ssm_tag_filters: s.ssm_tag_filters,
+            ssm_asg_name: s.ssm_asg_name,
+            key_pem,
         });
     }
 
@@ -187,7 +231,7 @@ pub fn export_sessions(vault: &Vault, ids: &[String], password: &str, path: &str
         .collect();
 
     let payload = BcnxPayload {
-        version: 2,
+        version: 3,
         exported_at: now_unix(),
         categories,
         sessions: sessions_out,
@@ -195,7 +239,12 @@ pub fn export_sessions(vault: &Vault, ids: &[String], password: &str, path: &str
     };
     let content = build_bcnx(password, &payload)?;
     std::fs::write(path, content)?;
-    Ok(())
+    Ok(ExportSummary { warnings })
+}
+
+#[derive(Serialize, Clone)]
+pub struct ExportSummary {
+    pub warnings: Vec<String>,
 }
 
 /// Decrypt and inspect a `.bcnx` file, returning a preview suitable for the
@@ -313,6 +362,14 @@ pub fn import_sessions(
             .as_ref()
             .and_then(|cid| cat_id_map.get(cid).cloned());
 
+        // If the bundle carried an embedded PEM, write it to a beacon-managed
+        // directory and use that as the new key_path. Falls back to the original
+        // (possibly stale) key_path string when the bundle didn't include keys.
+        let key_path = match (s.auth_kind, s.key_pem.as_deref()) {
+            (AuthKind::Key, Some(b64)) => Some(write_imported_key(&final_id, b64)?),
+            _ => s.key_path.clone(),
+        };
+
         let input = SessionInput {
             id: Some(final_id),
             name: final_name,
@@ -320,7 +377,7 @@ pub fn import_sessions(
             port: s.port,
             username: s.username.clone(),
             auth_kind: s.auth_kind,
-            key_path: s.key_path.clone(),
+            key_path,
             secret_plain: s.secret_plain.clone(),
             jump_session_id,
             color: s.color.clone(),
@@ -333,6 +390,9 @@ pub fn import_sessions(
             aws_profile: s.aws_profile.clone(),
             aws_access_key_id: s.aws_access_key_id.clone(),
             aws_secret_access_key: s.aws_secret_access_key.clone(),
+            ssm_target_kind: s.ssm_target_kind.clone(),
+            ssm_tag_filters: s.ssm_tag_filters.clone(),
+            ssm_asg_name: s.ssm_asg_name.clone(),
         };
 
         imported.push(crate::storage::sessions::upsert(vault, input)?);
@@ -373,6 +433,28 @@ pub fn import_sessions(
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Persist a PEM key carried inside a bundle to `<app_data>/Beacon/keys/<id>.pem`.
+/// Returns the absolute path the session row should reference.
+fn write_imported_key(session_id: &str, key_pem_b64: &str) -> AppResult<String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(key_pem_b64)
+        .map_err(|e| AppError::Other(format!("invalid embedded key (base64): {e}")))?;
+    let dir = dirs::data_dir()
+        .ok_or_else(|| AppError::Other("no data dir for imported keys".into()))?
+        .join("Beacon")
+        .join("keys");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{session_id}.pem"));
+    std::fs::write(&path, &bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(path.to_string_lossy().into_owned())
+}
+
 
 fn fetch_categories_by_ids(vault: &Vault, ids: &[String]) -> AppResult<Vec<CategoryRow>> {
     if ids.is_empty() {
@@ -461,7 +543,12 @@ mod tests {
                 aws_profile: None,
                 aws_access_key_id: None,
                 aws_secret_access_key: None,
+                ssm_target_kind: "instance".into(),
+                ssm_tag_filters: None,
+                ssm_asg_name: None,
+                key_pem: None,
             }],
+            upgrade_flows: vec![],
         }
     }
 

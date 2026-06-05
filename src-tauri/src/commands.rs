@@ -3,7 +3,7 @@ use crate::error::{AppError, AppResult};
 use crate::ssh::{self, SessionManager, SshTestResult};
 use crate::ssh::docker::{Container, ContainerStats, LogLine, RemoteCmdResult};
 use crate::storage::{self, Category, S3ConfigInput, S3ConfigPublic, Session, SessionInput, Vault, VaultState};
-use crate::transfer::{ImportPreview};
+use crate::transfer::{ExportSummary, ImportPreview};
 use std::sync::Arc;
 use tauri::State;
 
@@ -76,12 +76,14 @@ pub async fn test_session(
 
 #[tauri::command]
 pub async fn connect_session(
+    app: tauri::AppHandle,
     state: State<'_, VaultState>,
     manager: State<'_, Arc<SessionManager>>,
     id: String,
 ) -> AppResult<()> {
     let vault = snapshot_vault(&state)?;
-    manager.connect(&vault, &id).await
+    let mgr: Arc<SessionManager> = manager.inner().clone();
+    mgr.connect(app, &vault, &id).await
 }
 
 #[tauri::command]
@@ -225,8 +227,17 @@ pub fn export_sessions(
     ids: Vec<String>,
     password: String,
     path: String,
-) -> AppResult<()> {
-    with_vault(&state, |v| crate::transfer::export_sessions(v, &ids, &password, &path))
+    include_keys: Option<bool>,
+) -> AppResult<ExportSummary> {
+    with_vault(&state, |v| {
+        crate::transfer::export_sessions(
+            v,
+            &ids,
+            &password,
+            &path,
+            include_keys.unwrap_or(false),
+        )
+    })
 }
 
 #[tauri::command]
