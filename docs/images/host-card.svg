@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 240" width="560" height="240" font-family="Inter, system-ui, sans-serif">
+  <rect width="560" height="240" rx="10" fill="#141416"/>
+  <rect x="30" y="26" width="230" height="64" rx="8" fill="#18181A" stroke="#3A3A3E"/>
+  <text x="42" y="48" fill="#8C8C92" font-size="10">▾</text>
+  <circle cx="66" cy="44" r="4" fill="#7AC294"/>
+  <text x="78" y="48" fill="#EBEBED" font-size="11" font-weight="600">api-prod</text>
+  <path d="M176 48 v6 M170 44 h12 l-3 -3 v-6 h-6 v6 z" fill="#EBEBED" stroke="#EBEBED" stroke-width="1"/>
+  <rect x="196" y="38" width="30" height="12" rx="6" fill="#1E3A2A"/>
+  <text x="201" y="47" fill="#7AC294" font-size="7" font-weight="700">LIVE</text>
+  <text x="42" y="74" fill="#8C8C92" font-size="9">ubuntu@10.0.1.7</text>
+  <g fill="#8C8C92" font-size="11"><text x="152" y="77">🚀</text><text x="176" y="77">⚙</text><text x="200" y="77">▶_</text><text x="222" y="77">⟳</text><text x="242" y="77">✕</text></g>
+
+  <g stroke="#5A5A60" stroke-width="1" stroke-dasharray="3 3">
+    <line x1="176" y1="36" x2="300" y2="36"/>
+    <line x1="66" y1="52" x2="300" y2="72"/>
+    <line x1="158" y1="82" x2="300" y2="108"/>
+    <line x1="182" y1="82" x2="300" y2="132"/>
+    <line x1="206" y1="82" x2="300" y2="156"/>
+    <line x1="228" y1="82" x2="300" y2="180"/>
+    <line x1="248" y1="82" x2="300" y2="204"/>
+  </g>
+
+  <g font-size="10">
+    <text x="308" y="40" fill="#EBEBED" font-weight="600">Pin</text><text x="340" y="40" fill="#8C8C92">keep in sidebar when idle</text>
+    <text x="308" y="76" fill="#EBEBED" font-weight="600">Status</text><text x="352" y="76" fill="#8C8C92">green live · amber connecting</text>
+    <text x="308" y="112" fill="#EBEBED" font-weight="600">Upgrade</text><text x="364" y="112" fill="#8C8C92">run saved flow</text>
+    <text x="308" y="136" fill="#EBEBED" font-weight="600">Flow</text><text x="344" y="136" fill="#8C8C92">edit upgrade steps</text>
+    <text x="308" y="160" fill="#EBEBED" font-weight="600">Terminal</text><text x="366" y="160" fill="#8C8C92">opens your OS terminal over SSH</text>
+    <text x="308" y="184" fill="#EBEBED" font-weight="600">Refresh</text><text x="358" y="184" fill="#8C8C92">re-list containers</text>
+    <text x="308" y="208" fill="#EBEBED" font-weight="600">Disconnect</text><text x="378" y="208" fill="#8C8C92">closes the session</text>
+  </g>
+</svg>
