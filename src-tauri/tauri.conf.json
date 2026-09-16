@@ -41,7 +41,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRGRDcxM0Q3MENEREE5RDAKUldUUXFkME0xeFBYVC9DMnQzeW8vaXludFNCOXN0SmVZNTI5blhUbVRqeXI5bXkrWWo5bHJ6NE0K",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI0M0M3MkI0QTI5RTA0NTMKUldSVEJKNml0SEk4dENIZUJtMFVxbzB4aDZmY0JHV2R1YU1KamdSN3c3YkhiVTZZQUhZVWtVTDQK",
       "endpoints": [
         "https://github.com/PSNAppz/Beacon/releases/latest/download/latest.json"
       ],
