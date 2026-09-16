@@ -305,4 +305,4 @@ verification with a TOFU prompt.
 
 ## License
 
-TBD.
+MIT
