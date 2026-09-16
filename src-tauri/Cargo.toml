@@ -1,6 +1,6 @@
 [package]
 name = "beacon"
-version = "0.3.0"
+version = "0.4.0"
 description = "Beacon — remote log viewer"
 authors = ["Beacon"]
 edition = "2021"
