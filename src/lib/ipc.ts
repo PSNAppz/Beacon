@@ -142,6 +142,13 @@ export const api = {
   vaultCreate: (password: string) => invoke<void>("vault_create", { password }),
   vaultUnlock: (password: string) => invoke<void>("vault_unlock", { password }),
   vaultLock: () => invoke<void>("vault_lock"),
+  vaultHasRememberedPassword: () => invoke<boolean>("vault_has_remembered_password"),
+  vaultRememberPassword: (password: string) =>
+    invoke<void>("vault_remember_password", { password }),
+  vaultForgetPassword: () => invoke<void>("vault_forget_password"),
+  vaultUnlockRemembered: () => invoke<boolean>("vault_unlock_remembered"),
+  openExternalTerminal: (id: string) => invoke<void>("open_external_terminal", { id }),
+  fixKeyPermissions: (id: string) => invoke<void>("fix_key_permissions", { id }),
   listSessions: () => invoke<Session[]>("list_sessions"),
   saveSession: (input: SessionInput) => invoke<Session>("save_session", { input }),
   deleteSession: (id: string) => invoke<void>("delete_session", { id }),

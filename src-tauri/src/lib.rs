@@ -3,8 +3,10 @@ mod commands;
 mod crypto;
 mod error;
 mod s3;
+mod secretstore;
 mod ssh;
 mod storage;
+mod terminal;
 mod transfer;
 
 use std::sync::Arc;
@@ -14,9 +16,18 @@ use storage::VaultState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_dialog::init());
+
+    #[cfg(desktop)]
+    {
+        builder = builder
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .plugin(tauri_plugin_process::init());
+    }
+
+    builder
         .manage(VaultState::new())
         .manage(Arc::new(SessionManager::new()))
         .manage(Arc::new(archive::ArchiveState::new()))
@@ -26,6 +37,12 @@ pub fn run() {
             commands::vault_create,
             commands::vault_unlock,
             commands::vault_lock,
+            commands::vault_has_remembered_password,
+            commands::vault_remember_password,
+            commands::vault_forget_password,
+            commands::vault_unlock_remembered,
+            commands::open_external_terminal,
+            commands::fix_key_permissions,
             commands::list_sessions,
             commands::save_session,
             commands::delete_session,
@@ -59,6 +76,21 @@ pub fn run() {
             commands::delete_s3_config,
             commands::upload_container_logs_to_s3,
         ])
+        .on_window_event(|window, event| {
+            // Closing the window ends every remote session — nothing stays
+            // connected in the background after the app is gone.
+            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                use tauri::Manager;
+                if let Some(mgr) = window.try_state::<Arc<SessionManager>>() {
+                    let mgr: Arc<SessionManager> = mgr.inner().clone();
+                    // Bounded so a wedged connection can't block app exit.
+                    let _ = tauri::async_runtime::block_on(tokio::time::timeout(
+                        std::time::Duration::from_secs(3),
+                        async move { mgr.disconnect_all().await },
+                    ));
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

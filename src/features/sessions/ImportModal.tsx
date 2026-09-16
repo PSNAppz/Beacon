@@ -279,7 +279,7 @@ function PreviewRow({
             </span>
           )}
           {session.conflict === "same_name" && (
-            <span className="shrink-0 rounded bg-orange-500/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-orange-400">
+            <span className="shrink-0 rounded bg-warn/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-warn">
               Name conflict
             </span>
           )}

@@ -36,6 +36,75 @@ pub fn vault_lock(state: State<'_, VaultState>) {
     *state.inner.lock() = None;
 }
 
+// ─── Remembered master password (OS credential store) ─────────────────────────
+
+#[tauri::command]
+pub fn vault_has_remembered_password() -> bool {
+    crate::secretstore::has()
+}
+
+#[tauri::command]
+pub fn vault_remember_password(password: String) -> AppResult<()> {
+    crate::secretstore::save(&password)
+}
+
+#[tauri::command]
+pub fn vault_forget_password() -> AppResult<()> {
+    crate::secretstore::clear()
+}
+
+/// Unlock using the password held in the OS credential store. Returns false when
+/// nothing is remembered; a stored-but-wrong password is cleared and reported.
+#[tauri::command]
+pub fn vault_unlock_remembered(state: State<'_, VaultState>) -> AppResult<bool> {
+    let Some(password) = crate::secretstore::load() else {
+        return Ok(false);
+    };
+    match Vault::unlock(&password) {
+        Ok(v) => {
+            *state.inner.lock() = Some(v);
+            Ok(true)
+        }
+        Err(AppError::BadPassword) => {
+            // Stale entry (password was changed elsewhere) — drop it so the user
+            // isn't stuck retrying a password that can never work.
+            let _ = crate::secretstore::clear();
+            Ok(false)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+// ─── External terminal ────────────────────────────────────────────────────────
+
+/// Tighten the private keys used by a session (its own, plus its jump host's)
+/// to 0600. Scoped to a saved session so the UI can never chmod an arbitrary path.
+#[tauri::command]
+pub fn fix_key_permissions(state: State<'_, VaultState>, id: String) -> AppResult<()> {
+    with_vault(&state, |v| {
+        let session = storage::sessions::get(v, &id)?;
+        if let Some(path) = session.key_path.as_deref() {
+            crate::terminal::tighten_key_permissions(path)?;
+        }
+        if let Some(jump_id) = session.jump_session_id.as_deref() {
+            let jump = storage::sessions::get(v, jump_id)?;
+            if let Some(path) = jump.key_path.as_deref() {
+                crate::terminal::tighten_key_permissions(path)?;
+            }
+        }
+        Ok(())
+    })
+}
+
+#[tauri::command]
+pub async fn open_external_terminal(
+    state: State<'_, VaultState>,
+    id: String,
+) -> AppResult<()> {
+    let vault = snapshot_vault(&state)?;
+    crate::terminal::open_for_session(&vault, &id).await
+}
+
 fn with_vault<R>(state: &State<'_, VaultState>, f: impl FnOnce(&Vault) -> AppResult<R>) -> AppResult<R> {
     let guard = state.inner.lock();
     let v = guard.as_ref().ok_or(AppError::Locked)?;

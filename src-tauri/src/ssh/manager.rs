@@ -172,6 +172,15 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Tear down every live connection. Used when the app window closes so we
+    /// never leave orphaned SSH sessions (or SSM tunnels) behind.
+    pub async fn disconnect_all(&self) {
+        let ids: Vec<String> = self.sessions.lock().keys().cloned().collect();
+        for id in ids {
+            let _ = self.disconnect(&id).await;
+        }
+    }
+
     pub fn register_stream(&self, stream_id: String, handle: JoinHandle<()>) {
         self.streams.lock().insert(stream_id, handle);
     }

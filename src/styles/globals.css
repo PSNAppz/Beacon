@@ -9,17 +9,21 @@
 @tailwind utilities;
 
 @layer base {
+  /* Monochrome by design: the whole chrome is greyscale, so the only colour
+     left in the app is state. Errors and warnings therefore read instantly
+     instead of competing with a blue accent. */
   :root {
-    --bg: 14 16 20;
-    --surface: 20 23 28;
-    --surface-2: 27 31 38;
-    --border: 38 43 52;
-    --fg: 232 234 238;
-    --muted: 148 156 168;
-    --accent: 120 200 255;
-    --danger: 255 110 110;
-    --warn: 255 196 90;
-    --ok: 120 220 150;
+    --bg: 9 9 10;
+    --surface: 18 18 20;
+    --surface-2: 28 28 31;
+    --border: 44 44 48;
+    --fg: 235 235 237;
+    --muted: 140 140 146;
+    --accent: 255 255 255;
+    /* State only. Desaturated so they sit inside a greyscale system. */
+    --danger: 216 108 108;
+    --warn: 214 174 104;
+    --ok: 122 194 148;
   }
 
   html, body, #root {

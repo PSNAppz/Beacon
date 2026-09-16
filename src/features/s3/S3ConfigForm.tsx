@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { s3Api, S3ConfigInput, errorMessage } from "../../lib/ipc";
 import { useApp } from "../../lib/store";
-import { Button, Field, Input } from "../../components/ui";
+import { Button, ConfirmDialog, Field, Input } from "../../components/ui";
 
 export function S3ConfigForm() {
   const s3Config = useApp((s) => s.s3Config);
@@ -14,6 +14,7 @@ export function S3ConfigForm() {
 
   const [status, setStatus] = useState<"idle" | "saving" | "deleting" | "ok" | "error">("idle");
   const [error, setError] = useState("");
+  const [pendingRemove, setPendingRemove] = useState(false);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
@@ -46,7 +47,7 @@ export function S3ConfigForm() {
   }
 
   async function handleDelete() {
-    if (!confirm("Remove S3 configuration? Log backups will be disabled.")) return;
+    setPendingRemove(false);
     setStatus("deleting");
     try {
       await s3Api.deleteConfig();
@@ -120,7 +121,7 @@ export function S3ConfigForm() {
         {s3Config ? (
           <button
             type="button"
-            onClick={handleDelete}
+            onClick={() => setPendingRemove(true)}
             disabled={status === "deleting" || status === "saving"}
             className="text-[12px] text-danger hover:underline disabled:opacity-40"
           >
@@ -137,6 +138,16 @@ export function S3ConfigForm() {
           {status === "saving" ? "Saving…" : "Save"}
         </Button>
       </div>
+
+      <ConfirmDialog
+        open={pendingRemove}
+        onOpenChange={setPendingRemove}
+        title="Remove S3 configuration?"
+        body="Log backups to S3 will be disabled. Logs already uploaded are not deleted."
+        confirmLabel="Remove"
+        destructive
+        onConfirm={handleDelete}
+      />
     </form>
   );
 }

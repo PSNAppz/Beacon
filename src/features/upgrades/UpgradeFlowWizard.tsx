@@ -91,7 +91,7 @@ export function UpgradeFlowWizard({ sessionId, sessionName, existing, onSave, on
         {/* Body */}
         <div className="px-6 py-5 space-y-5 overflow-y-auto max-h-[65vh]">
           {/* Info */}
-          <div className="bg-indigo-500/8 border border-indigo-500/20 rounded-lg px-3.5 py-3 text-xs text-indigo-200/70 space-y-1">
+          <div className="bg-accent/8 border border-accent/20 rounded-lg px-3.5 py-3 text-xs text-accent/70 space-y-1">
             <p>Each step is a <strong>complete shell command</strong> run on the server.</p>
             <p>Set a <strong>working directory</strong> and it will be applied to every step automatically — no need to repeat <code className="bg-white/10 px-1 rounded">cd</code> in each command.</p>
           </div>
@@ -102,7 +102,7 @@ export function UpgradeFlowWizard({ sessionId, sessionName, existing, onSave, on
               Label <span className="text-white/25">(optional)</span>
             </label>
             <input
-              className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-white/25 focus:outline-none focus:border-indigo-500/60"
+              className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-white/25 focus:outline-none focus:border-accent/60"
               placeholder={`${sessionName} upgrade`}
               value={label}
               onChange={(e) => setLabel(e.target.value)}
@@ -115,7 +115,7 @@ export function UpgradeFlowWizard({ sessionId, sessionName, existing, onSave, on
               Working directory <span className="text-white/25">(optional)</span>
             </label>
             <input
-              className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white font-mono placeholder-white/25 focus:outline-none focus:border-indigo-500/60"
+              className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white font-mono placeholder-white/25 focus:outline-none focus:border-accent/60"
               placeholder="/home/ubuntu/my-app"
               value={workingDirectory}
               onChange={(e) => setWorkingDirectory(e.target.value)}
@@ -140,22 +140,22 @@ export function UpgradeFlowWizard({ sessionId, sessionName, existing, onSave, on
                   <span className="shrink-0 w-5 h-5 mt-2 rounded-full bg-white/8 text-white/30 text-[10px] flex items-center justify-center font-mono">{i + 1}</span>
                   <textarea
                     rows={step.length > 60 ? 2 : 1}
-                    className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white font-mono placeholder-white/20 focus:outline-none focus:border-indigo-500/60 resize-none"
+                    className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white font-mono placeholder-white/20 focus:outline-none focus:border-accent/60 resize-none"
                     placeholder={PLACEHOLDER_STEPS[i] ?? "command…"}
                     value={step}
                     onChange={(e) => updateStep(i, e.target.value)}
                   />
-                  <button onClick={() => removeStep(i)} className="shrink-0 mt-2 text-white/20 hover:text-red-400 transition-colors text-sm" title="Remove step">✕</button>
+                  <button onClick={() => removeStep(i)} className="shrink-0 mt-2 text-white/20 hover:text-danger transition-colors text-sm" title="Remove step">✕</button>
                 </div>
               ))}
             </div>
-            <button onClick={addStep} className="mt-3 flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300 transition-colors">
+            <button onClick={addStep} className="mt-3 flex items-center gap-1.5 text-xs text-accent hover:text-accent transition-colors">
               <span className="text-base leading-none">+</span> Add step
             </button>
           </div>
 
           {error && (
-            <p className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{error}</p>
+            <p className="text-xs text-danger bg-danger/10 border border-danger/20 rounded-lg px-3 py-2">{error}</p>
           )}
         </div>
 
@@ -166,7 +166,7 @@ export function UpgradeFlowWizard({ sessionId, sessionName, existing, onSave, on
               <button
                 onClick={handleDelete}
                 disabled={deleting}
-                className="text-xs text-red-400/60 hover:text-red-400 transition-colors disabled:opacity-50"
+                className="text-xs text-danger/60 hover:text-danger transition-colors disabled:opacity-50"
               >
                 {deleting ? "Deleting…" : "Delete flow"}
               </button>
@@ -177,7 +177,7 @@ export function UpgradeFlowWizard({ sessionId, sessionName, existing, onSave, on
             <button
               onClick={handleSave}
               disabled={saving}
-              className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
+              className="px-5 py-2 bg-fg hover:bg-fg/90 disabled:opacity-50 text-bg text-sm font-medium rounded-lg transition-colors"
             >
               {saving ? "Saving…" : "Save Flow"}
             </button>

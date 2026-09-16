@@ -4,16 +4,13 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   api,
   errorMessage,
-  onDiagCommand,
   onLogBatch,
   onLogEnd,
   s3Api,
   upgradeApi,
   type Container,
   type ContainerStats,
-  type DiagCommand,
   type LogLine,
-  type RemoteCmdResult,
   type Session,
   type UpgradeFlow,
 } from "../lib/ipc";
@@ -21,6 +18,7 @@ import { useApp } from "../lib/store";
 import { toast } from "../lib/toastStore";
 import {
   loadSavedTabs,
+  saveTabs,
   useWorkspace,
   type Tab,
   type WorkspaceStore,
@@ -30,7 +28,15 @@ import {
   HIGHLIGHT_COLOR_CLASSES,
   ALERT_COOLDOWN_MS,
 } from "../lib/rulesStore";
-import { Button, Input } from "../components/ui";
+import {
+  Button, Field, IconButton, Input, Menu, MenuCheckItem, MenuContent, MenuItem,
+  MenuLabel, MenuSeparator, MenuSub, MenuTrigger, Modal,
+} from "../components/ui";
+import {
+  ChevronLeft, ChevronRight, ChevronsDown, Columns2, Eraser, MoreHorizontal, Pause, Pin, Play,
+  Plus, RefreshCw, Rocket, Search, Settings, Terminal, X,
+} from "lucide-react";
+import { Group, Panel, Separator, useDefaultLayout } from "react-resizable-panels";
 import { CommandPalette } from "./CommandPalette";
 import { RulesModal } from "../features/rules/RulesModal";
 import { UpgradeFlowWizard } from "../features/upgrades/UpgradeFlowWizard";
@@ -41,6 +47,15 @@ import { S3BackupPhasePanel, type S3BackupPhase } from "../features/upgrades/S3B
 const MAX_LINES = 10_000;
 const ROW_HEIGHT = 18;
 
+/** Draggable divider. Wide enough to grab, thin enough to read as a border. */
+function ResizeHandle() {
+  return (
+    <Separator className="group relative w-px shrink-0 bg-border outline-none focus-visible:bg-accent">
+      <div className="absolute inset-y-0 -left-1 -right-1 transition-colors group-hover:bg-accent/30 group-data-[state=dragging]:bg-accent/50" />
+    </Separator>
+  );
+}
+
 // ─── Page ────────────────────────────────────────────────────────────────────
 
 export function WorkspacePage() {
@@ -50,8 +65,14 @@ export function WorkspacePage() {
   const ws = useWorkspace();
 
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [consoleSessionId, setConsoleSessionId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  // Remembers how wide the user dragged the host tree.
+  const workspaceLayout = useDefaultLayout({
+    id: "beacon:workspace:v1",
+    panelIds: ["hosts", "main"],
+    storage: localStorage,
+  });
 
   // ── Upgrade flow state ────────────────────────────────────────────────────
   // upgradeFlows: session_id -> UpgradeFlow | null
@@ -139,7 +160,11 @@ export function WorkspacePage() {
   useEffect(() => {
     if (useWorkspace.getState().storageRestored) return;
     useWorkspace.getState().markStorageRestored();
-    const saved = loadSavedTabs();
+    // Only pinned hosts come back after a restart — everything else was closed
+    // when the app exited and should not silently reconnect.
+    const pinned = new Set(useWorkspace.getState().pinned);
+    const saved = loadSavedTabs().filter((t) => pinned.has(t.sessionId));
+    saveTabs(saved);
     if (saved.length > 0) {
       useWorkspace.setState({ tabs: saved, activeTabId: saved[0].id });
       const ids = [...new Set(saved.map((t) => t.sessionId))];
@@ -200,17 +225,18 @@ export function WorkspacePage() {
     );
   }
 
-  const consoleConn = consoleSessionId ? ws.connState[consoleSessionId] : undefined;
   const hasSplit = !!splitTab;
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full flex-col">
+    <Group orientation="horizontal" className="flex min-h-0 flex-1" {...workspaceLayout}>
       {/* ── Left: host tree ── */}
       {sidebarOpen && (
+        <>
+        <Panel id="hosts" defaultSize="19%" minSize="12%" maxSize="38%" className="flex">
         <HostTree
           sessions={sessions}
           ws={ws}
-          consoleSessionId={consoleSessionId}
           upgradeFlows={upgradeFlows}
           onOpenWizard={(sessionId, existing) =>
             setWizardTarget({ sessionId, existing })
@@ -218,15 +244,16 @@ export function WorkspacePage() {
           onOpenUpgrade={(sessionId, sessionName, flow) =>
             setConfirmTarget({ sessionId, sessionName, flow })
           }
-          onToggleConsole={(id) =>
-            setConsoleSessionId((cur) => (cur === id ? null : id))
-          }
+          onOpenPalette={() => setPaletteOpen(true)}
           onCollapse={() => setSidebarOpen(false)}
         />
+        </Panel>
+        <ResizeHandle />
+        </>
       )}
 
       {/* ── Right: tab bar + content ── */}
-      <div className="flex min-w-0 flex-1 flex-col">
+      <Panel id="main" minSize="30%" className="flex min-w-0 flex-col">
         <TabBar
           tabs={ws.tabs}
           sessions={sessions}
@@ -246,8 +273,8 @@ export function WorkspacePage() {
         />
 
         {/* Panes */}
-        <div className={`flex min-h-0 flex-1 ${hasSplit ? "divide-x divide-border" : "flex-col"}`}>
-          <div className="flex min-h-0 flex-1 flex-col">
+        <Group orientation="horizontal" className="flex min-h-0 flex-1">
+          <Panel id="pane-a" minSize="20%" className="flex min-h-0 flex-col">
             {activeTab ? (
               <LogPane
                 key={activeTab.id}
@@ -263,9 +290,11 @@ export function WorkspacePage() {
             ) : (
               <EmptyPane onOpenPalette={() => setPaletteOpen(true)} />
             )}
-          </div>
+          </Panel>
           {splitTab && (
-            <div className="flex min-h-0 flex-1 flex-col">
+            <>
+            <ResizeHandle />
+            <Panel id="pane-b" minSize="20%" className="flex min-h-0 flex-col">
               <LogPane
                 key={splitTab.id}
                 paneId={splitTab.id}
@@ -277,33 +306,29 @@ export function WorkspacePage() {
                 onDiffLines={notifyDiff}
                 scrollControllersRef={scrollControllersRef}
               />
-            </div>
+            </Panel>
+            </>
           )}
-        </div>
+        </Group>
 
-        {/* Console strip */}
-        {consoleSessionId && consoleConn === "connected" && (
-          s3BackupPhase && s3BackupPhase.sessionId === consoleSessionId
-            ? <S3BackupPhasePanel
-                phase={s3BackupPhase}
-                onProceed={handleS3BackupProceed}
-                onCancel={() => setS3BackupPhase(null)}
-              />
-            : runTarget && runTarget.sessionId === consoleSessionId
-              ? <UpgradeRunPanel
-                  sessionId={runTarget.sessionId}
-                  runId={runTarget.runId}
-                  steps={runTarget.steps}
-                  onClose={() => setRunTarget(null)}
-                  onComplete={() => {}}
-                />
-              : <ConsolePane
-                  sessionId={consoleSessionId}
-                  compact={!!activeTab}
-                  onClose={() => setConsoleSessionId(null)}
-                />
-        )}
-      </div>
+        {/* Upgrade strip — shown only while a flow is backing up or running */}
+        {s3BackupPhase ? (
+          <S3BackupPhasePanel
+            phase={s3BackupPhase}
+            onProceed={handleS3BackupProceed}
+            onCancel={() => setS3BackupPhase(null)}
+          />
+        ) : runTarget ? (
+          <UpgradeRunPanel
+            sessionId={runTarget.sessionId}
+            runId={runTarget.runId}
+            steps={runTarget.steps}
+            onClose={() => setRunTarget(null)}
+            onComplete={() => {}}
+          />
+        ) : null}
+      </Panel>
+    </Group>
 
       {paletteOpen && (
         <CommandPalette
@@ -340,7 +365,6 @@ export function WorkspacePage() {
             const runId = crypto.randomUUID();
             const sid = confirmTarget.sessionId;
             setConfirmTarget(null);
-            setConsoleSessionId(sid);
 
             if (s3Config) {
               const containers = ws.containers[sid] ?? [];
@@ -395,30 +419,41 @@ export function WorkspacePage() {
 function HostTree({
   sessions,
   ws,
-  consoleSessionId,
   upgradeFlows,
   onOpenWizard,
   onOpenUpgrade,
-  onToggleConsole,
+  onOpenPalette,
   onCollapse,
 }: {
   sessions: Session[];
   ws: WorkspaceStore;
-  consoleSessionId: string | null;
   upgradeFlows: Record<string, UpgradeFlow | null>;
   onOpenWizard: (sessionId: string, existing: UpgradeFlow | null) => void;
   onOpenUpgrade: (sessionId: string, sessionName: string, flow: UpgradeFlow) => void;
-  onToggleConsole: (id: string) => void;
+  onOpenPalette: () => void;
   onCollapse: () => void;
 }) {
   const categories = useApp((s) => s.categories);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
 
+  // The workspace only lists hosts that are in play: anything live (or trying to
+  // get live) plus anything explicitly pinned. Everything else lives on the
+  // Sessions page or behind Ctrl+K.
+  const visible = useMemo(
+    () =>
+      sessions.filter((s) => {
+        if (ws.pinned.includes(s.id)) return true;
+        const state = ws.connState[s.id] ?? "idle";
+        return state !== "idle";
+      }),
+    [sessions, ws.pinned, ws.connState],
+  );
+
   // Group sessions by category for the sidebar tree
   const groups = useMemo(() => {
     const result: { label: string | null; sessions: Session[] }[] = [];
     const byCat = new Map<string | null, Session[]>();
-    for (const s of sessions) {
+    for (const s of visible) {
       const key = s.category_id ?? null;
       if (!byCat.has(key)) byCat.set(key, []);
       byCat.get(key)!.push(s);
@@ -432,7 +467,7 @@ function HostTree({
       result.push({ label: categories.length > 0 ? "Other" : null, sessions: uncategorised });
     }
     return result;
-  }, [sessions, categories]);
+  }, [visible, categories]);
 
   useEffect(() => {
     const connected = Object.entries(ws.connState)
@@ -456,25 +491,44 @@ function HostTree({
   }
 
   return (
-    <aside className="flex w-64 shrink-0 flex-col border-r border-border bg-surface">
+    <aside className="flex min-w-0 flex-1 flex-col border-r border-border bg-surface/60 backdrop-blur-xl">
       <div className="flex items-center justify-between border-b border-border px-3 py-2.5">
         <span className="text-xs font-semibold uppercase tracking-wider text-muted">Hosts</span>
+        <div className="flex items-center gap-0.5">
+        <button
+          onClick={onOpenPalette}
+          className="rounded p-0.5 text-muted hover:bg-surface-2 hover:text-fg"
+          title="Add a host to the workspace (Ctrl+K)"
+        >
+          <Plus size={14} />
+        </button>
         <button
           onClick={onCollapse}
           className="rounded p-0.5 text-muted hover:bg-surface-2 hover:text-fg"
           title="Collapse sidebar"
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M15 18l-6-6 6-6" />
-          </svg>
+          <ChevronLeft size={14} />
         </button>
+        </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto py-1">
-        {sessions.length === 0 ? (
-          <div className="px-4 py-3 text-xs text-muted">
-            No sessions.{" "}
-            <Link to="/" className="text-accent hover:underline">Add one</Link>
+        {visible.length === 0 ? (
+          <div className="px-4 py-3 text-xs leading-relaxed text-muted">
+            {sessions.length === 0 ? (
+              <>
+                No sessions.{" "}
+                <Link to="/" className="text-accent hover:underline">Add one</Link>
+              </>
+            ) : (
+              <>
+                No active hosts.{" "}
+                <button onClick={onOpenPalette} className="text-accent hover:underline">
+                  Connect one
+                </button>{" "}
+                or pin a host to keep it here.
+              </>
+            )}
           </div>
         ) : (
           groups.map((group) => (
@@ -492,8 +546,8 @@ function HostTree({
                   ws={ws}
                   expanded={expanded.has(s.id)}
                   onToggle={() => toggle(s.id)}
-                  consoleOpen={consoleSessionId === s.id}
-                  onToggleConsole={() => onToggleConsole(s.id)}
+                  pinned={ws.pinned.includes(s.id)}
+                  onTogglePin={() => ws.togglePin(s.id)}
                   upgradeFlow={upgradeFlows[s.id] ?? null}
                   onOpenWizard={onOpenWizard}
                   onOpenUpgrade={onOpenUpgrade}
@@ -516,8 +570,8 @@ function SessionNode({
   ws,
   expanded,
   onToggle,
-  consoleOpen,
-  onToggleConsole,
+  pinned,
+  onTogglePin,
   upgradeFlow,
   onOpenWizard,
   onOpenUpgrade,
@@ -526,13 +580,14 @@ function SessionNode({
   ws: WorkspaceStore;
   expanded: boolean;
   onToggle: () => void;
-  consoleOpen: boolean;
-  onToggleConsole: () => void;
+  pinned: boolean;
+  onTogglePin: () => void;
   upgradeFlow: UpgradeFlow | null;
   onOpenWizard: (sessionId: string, existing: UpgradeFlow | null) => void;
   onOpenUpgrade: (sessionId: string, sessionName: string, flow: UpgradeFlow) => void;
 }) {
   const state = ws.connState[session.id] ?? "idle";
+  const [openingTerminal, setOpeningTerminal] = useState(false);
   const containers = ws.containers[session.id] ?? [];
   const loading = ws.containersLoading[session.id];
   const error = ws.connError[session.id];
@@ -547,6 +602,40 @@ function SessionNode({
   const isConnecting = state === "connecting";
   const isIdle = state === "idle";
   const isError = state === "error";
+
+  async function openTerminal(retrying = false) {
+    setOpeningTerminal(true);
+    try {
+      await api.openExternalTerminal(session.id);
+    } catch (e) {
+      const msg = errorMessage(e);
+      // ssh refuses a key other users can read. Offer the standard fix rather
+      // than making the user go and chmod it themselves.
+      const keyPath = msg.startsWith("key-permissions:")
+        ? msg.slice("key-permissions:".length).trim()
+        : null;
+      if (keyPath && !retrying) {
+        const ok = confirm(
+          `ssh won't use this key because other users can read it:\n\n${keyPath}\n\n` +
+            `Restrict it to you only (chmod 600) and open the terminal?`,
+        );
+        if (ok) {
+          try {
+            await api.fixKeyPermissions(session.id);
+            setOpeningTerminal(false);
+            await openTerminal(true);
+            return;
+          } catch (fixErr) {
+            toast("error", `Could not fix key permissions: ${errorMessage(fixErr)}`);
+          }
+        }
+      } else {
+        toast("error", `Terminal: ${msg}`);
+      }
+    } finally {
+      setOpeningTerminal(false);
+    }
+  }
 
   return (
     <div className="mx-1.5 my-0.5">
@@ -579,6 +668,15 @@ function SessionNode({
           >
             {session.name}
           </button>
+          <button
+            onClick={onTogglePin}
+            title={pinned ? "Unpin from workspace" : "Pin to workspace"}
+            className={`shrink-0 rounded p-0.5 transition-colors ${
+              pinned ? "text-accent" : "text-muted/50 hover:text-fg"
+            }`}
+          >
+            {pinned ? <Pin size={12} fill="currentColor" /> : <Pin size={12} />}
+          </button>
           {isConnected && (
             <span className="shrink-0 rounded-full bg-ok/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-ok">
               live
@@ -602,14 +700,9 @@ function SessionNode({
                 <button
                   onClick={() => onOpenUpgrade(session.id, session.name, upgradeFlow)}
                   title={`Run upgrade: ${upgradeFlow.label ?? session.name}`}
-                  className="rounded p-1 text-indigo-400 hover:bg-indigo-500/15 transition-colors"
+                  className="rounded p-1 text-accent hover:bg-accent/15 transition-colors"
                 >
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/>
-                    <path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/>
-                    <path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/>
-                    <path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/>
-                  </svg>
+                  <Rocket size={13} />
                 </button>
               )}
               <button
@@ -617,20 +710,15 @@ function SessionNode({
                 title={upgradeFlow ? "Edit upgrade flow" : "Set up upgrade flow"}
                 className="rounded p-1 text-muted hover:text-fg hover:bg-surface-2 transition-colors"
               >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
-                  <circle cx="12" cy="12" r="3"/>
-                </svg>
+                <Settings size={13} />
               </button>
               <button
-                onClick={onToggleConsole}
-                title="Toggle console"
-                className={`rounded p-1 transition-colors ${consoleOpen ? "text-accent bg-accent/10" : "text-muted hover:text-fg hover:bg-surface-2"}`}
+                onClick={() => openTerminal()}
+                disabled={openingTerminal}
+                title="Open an SSH terminal in your system terminal app"
+                className="rounded p-1 text-muted transition-colors hover:bg-surface-2 hover:text-fg disabled:opacity-40"
               >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="4 17 10 11 4 5"/>
-                  <line x1="12" x2="20" y1="19" y2="19"/>
-                </svg>
+                <Terminal size={13} />
               </button>
               <button
                 onClick={() => ws.refreshContainers(session.id)}
@@ -638,21 +726,14 @@ function SessionNode({
                 title="Refresh containers"
                 className="rounded p-1 text-muted hover:text-fg hover:bg-surface-2 disabled:opacity-40 transition-colors"
               >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
-                  <path d="M21 3v5h-5"/>
-                  <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
-                  <path d="M8 16H3v5"/>
-                </svg>
+                <RefreshCw size={13} />
               </button>
               <button
                 onClick={() => ws.disconnect(session.id)}
                 title="Disconnect"
                 className="rounded p-1 text-muted hover:text-danger hover:bg-danger/10 transition-colors"
               >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="18" x2="6" y1="6" y2="18"/><line x1="6" x2="18" y1="6" y2="18"/>
-                </svg>
+                <X size={13} />
               </button>
             </div>
           </div>
@@ -660,12 +741,20 @@ function SessionNode({
 
         {/* ── Row 2: connect button (idle) ── */}
         {isIdle && (
-          <div className="px-2 pb-2">
+          <div className="flex items-center gap-1 px-2 pb-2">
             <button
               onClick={() => ws.connect(session.id)}
-              className="w-full rounded-md bg-accent/10 px-3 py-1.5 text-[11px] font-semibold text-accent hover:bg-accent/20 transition-colors"
+              className="flex-1 rounded-md bg-accent/10 px-3 py-1.5 text-[11px] font-semibold text-accent hover:bg-accent/20 transition-colors"
             >
               Connect
+            </button>
+            <button
+              onClick={() => openTerminal()}
+              disabled={openingTerminal}
+              title="Open an SSH terminal in your system terminal app"
+              className="shrink-0 rounded p-1.5 text-muted transition-colors hover:bg-surface-2 hover:text-fg disabled:opacity-40"
+            >
+              <Terminal size={13} />
             </button>
           </div>
         )}
@@ -816,16 +905,14 @@ function TabBar({
   onToggleDiff: () => void;
 }) {
   return (
-    <div className="flex items-stretch border-b border-border bg-surface">
+    <div className="flex items-stretch border-b border-border bg-surface/70 backdrop-blur-xl">
       {!sidebarOpen && (
         <button
           onClick={onExpandSidebar}
           className="shrink-0 border-r border-border px-2.5 text-muted hover:bg-surface-2 hover:text-fg"
           title="Expand sidebar"
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M9 18l6-6-6-6" />
-          </svg>
+          <ChevronRight size={14} />
         </button>
       )}
 
@@ -854,33 +941,27 @@ function TabBar({
                   />
                 )}
                 <span className="max-w-[120px] truncate">{tab.containerName}</span>
-                {isSplit && (
-                  <span className="text-[9px] text-accent" title="Split pane">⊟</span>
-                )}
-                {!isSplit && (
-                  <button
-                    onClick={(e) => { e.stopPropagation(); onSplit(tab.id); }}
-                    className="hidden rounded p-0.5 text-[9px] text-muted hover:text-accent group-hover:inline-flex"
-                    title="Open in split pane"
-                  >
-                    ⊟
-                  </button>
-                )}
-                {isSplit && (
-                  <button
-                    onClick={(e) => { e.stopPropagation(); onSplit(tab.id); }}
-                    className="rounded p-0.5 text-[9px] text-accent hover:text-muted"
-                    title="Close split pane"
-                  >
-                    ⊟
-                  </button>
-                )}
+                {/* Always visible: a hover-only split control is undiscoverable,
+                    and its state doubles as the indicator for the split pane. */}
+                <button
+                  onClick={(e) => { e.stopPropagation(); onSplit(tab.id); }}
+                  aria-label={isSplit ? "Close split pane" : "Open in split pane"}
+                  title={isSplit ? "Close split pane" : "Open in split pane"}
+                  className={`ml-0.5 shrink-0 rounded p-0.5 transition-colors ${
+                    isSplit
+                      ? "text-accent hover:text-fg"
+                      : "text-muted/60 hover:bg-surface hover:text-accent"
+                  }`}
+                >
+                  <Columns2 size={12} />
+                </button>
                 <button
                   onClick={(e) => { e.stopPropagation(); onClose(tab.id); }}
-                  className="ml-0.5 rounded px-0.5 text-[11px] text-muted hover:bg-surface hover:text-danger"
+                  aria-label="Close tab"
                   title="Close tab"
+                  className="shrink-0 rounded p-0.5 text-muted/60 hover:bg-surface hover:text-danger"
                 >
-                  ×
+                  <X size={12} />
                 </button>
               </div>
             );
@@ -1027,7 +1108,7 @@ function DensityScrubber({
             style={{
               backgroundColor:
                 intensity > 0
-                  ? `rgba(120, 200, 255, ${0.1 + intensity * 0.9})`
+                  ? `rgba(235, 235, 237, ${0.08 + intensity * 0.72})`
                   : "transparent",
             }}
             onClick={() => { if (idx !== -1) onJump(idx); }}
@@ -1093,10 +1174,6 @@ function LogPane({
   const archivePendingRef = useRef<LogLine[]>([]);
   const [archiveLoading, setArchiveLoading] = useState(false);
   const [showingArchive, setShowingArchive] = useState(false);
-
-  // Phase 7: export dropdown
-  const [exportOpen, setExportOpen] = useState(false);
-  const exportRef = useRef<HTMLDivElement>(null);
 
   const filters = useRules((s) => s.filters);
   const highlights = useRules((s) => s.highlights);
@@ -1330,18 +1407,6 @@ function LogPane({
     };
   }, [diffMode, paneId, scrollControllersRef]);
 
-  // Close export dropdown on outside click
-  useEffect(() => {
-    if (!exportOpen) return;
-    const h = (e: MouseEvent) => {
-      if (exportRef.current && !exportRef.current.contains(e.target as Node)) {
-        setExportOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", h);
-    return () => document.removeEventListener("mousedown", h);
-  }, [exportOpen]);
-
   function handleSaveFilter() {
     if (!saveFilterName.trim() || !filter.trim()) return;
     addFilter(saveFilterName.trim(), filter);
@@ -1365,7 +1430,6 @@ function LogPane({
   }
 
   async function handleExport(format: "txt" | "json") {
-    setExportOpen(false);
     try {
       const { save } = await import("@tauri-apps/plugin-dialog");
       const path = await save({
@@ -1388,147 +1452,144 @@ function LogPane({
 
   return (
     <>
-      {/* ── Toolbar ── */}
-      <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface px-3 py-1.5 text-[12px]">
-        <span className="font-medium">{container.name}</span>
-        <span className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10.5px] text-muted">
-          {container.id.slice(0, 12)}
-        </span>
-        {container.status && <span className="text-muted">{container.status}</span>}
+      {/* ── Toolbar ──
+          Three fixed zones that never wrap: identity (truncates), the filter,
+          and the hot controls plus an overflow menu. Everything used less than
+          once a minute lives in the menu, so the log area keeps its height. */}
+      <div className="flex items-center gap-2 border-b border-border bg-surface px-3 py-1.5 text-[12px]">
+        {/* Identity — the only zone allowed to shrink */}
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <span className="truncate font-medium">{container.name}</span>
+          <span className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10.5px] text-muted">
+            {container.id.slice(0, 12)}
+          </span>
+          {container.status && (
+            <span className="hidden truncate text-muted lg:inline">{container.status}</span>
+          )}
+        </div>
 
-        <div className="ml-auto flex flex-wrap items-center gap-1.5">
-          {/* Filter input */}
+        {/* Filter — always reachable */}
+        <div className="relative shrink-0">
+          <Search size={12} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-muted" />
           <Input
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             placeholder="filter (regex)"
-            className="w-44 py-0.5 text-[12px]"
+            aria-label="Filter log lines by regular expression"
+            className="w-40 py-1 pl-7 pr-6 text-[12px] xl:w-56"
           />
-
-          {/* Save current filter */}
-          {!savingFilter && filter.trim() && (
+          {filter && (
             <button
-              onClick={() => setSavingFilter(true)}
-              title="Save filter as preset"
-              className="rounded px-1.5 py-0.5 text-[11px] text-muted hover:bg-surface-2 hover:text-fg"
+              onClick={() => setFilter("")}
+              aria-label="Clear filter"
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted hover:text-fg"
             >
-              ★
+              <X size={11} />
             </button>
           )}
-          {savingFilter && (
-            <div className="flex items-center gap-1">
-              <input
-                autoFocus
-                value={saveFilterName}
-                onChange={(e) => setSaveFilterName(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") handleSaveFilter();
-                  else if (e.key === "Escape") { setSavingFilter(false); setSaveFilterName(""); }
-                }}
-                placeholder="preset name"
-                className="w-28 rounded border border-border bg-surface-2 px-2 py-0.5 text-[11px] text-fg placeholder:text-muted focus:border-accent/60 focus:outline-none"
-              />
-              <button onClick={handleSaveFilter} disabled={!saveFilterName.trim()} className="rounded px-1.5 py-0.5 text-[11px] text-accent hover:bg-accent/10 disabled:opacity-40">Save</button>
-              <button onClick={() => { setSavingFilter(false); setSaveFilterName(""); }} className="rounded px-1 py-0.5 text-[11px] text-muted hover:text-fg">✕</button>
-            </div>
-          )}
+        </div>
 
-          {/* Filter presets */}
-          {filters.length > 0 && (
-            <select
-              value=""
-              onChange={(e) => { if (e.target.value) setFilter(e.target.value); }}
-              className="rounded border border-border bg-surface-2 px-1 py-0.5 text-[11px] text-muted"
-              title="Load saved filter"
-            >
-              <option value="">Presets…</option>
-              {filters.map((f) => (
-                <option key={f.id} value={f.pattern}>{f.name}</option>
-              ))}
-            </select>
-          )}
-
-          <select
-            value={tail}
-            onChange={(e) => setTail(Number(e.target.value))}
-            className="rounded border border-border bg-surface-2 px-1 py-0.5 text-[11px] text-muted"
+        {/* Hot controls */}
+        <div className="flex shrink-0 items-center gap-0.5">
+          <IconButton
+            label={paused ? "Resume stream" : "Pause stream"}
+            active={paused}
+            onClick={() => setPaused((p) => !p)}
           >
-            <option value={100}>tail 100</option>
-            <option value={500}>tail 500</option>
-            <option value={2000}>tail 2k</option>
-            <option value={10000}>tail 10k</option>
-          </select>
-
-          <Button variant="ghost" className="px-2 py-0.5 text-[11px]" onClick={() => setPaused((p) => !p)}>
-            {paused ? "Resume" : "Pause"}
-          </Button>
-          <Button variant="ghost" className="px-2 py-0.5 text-[11px]" onClick={() => setAutoScroll((a) => !a)}>
-            {autoScroll ? "⇊ Auto" : "⇊ Manual"}
-          </Button>
-          <Button variant="ghost" className="px-2 py-0.5 text-[11px]" onClick={() => {
-            linesRef.current = []; pendingRef.current = []; setShowingArchive(false); setLinesTick((n) => n + 1);
-          }}>
-            Clear
-          </Button>
-
-          {/* Stats toggle */}
-          <button
-            onClick={() => setStatsOpen((o) => !o)}
-            title="Toggle stats panel"
-            className={`rounded px-2 py-0.5 text-[11px] transition-colors ${
-              statsOpen ? "bg-accent/15 text-accent" : "text-muted hover:bg-surface-2 hover:text-fg"
-            }`}
+            {paused ? <Play size={14} /> : <Pause size={14} />}
+          </IconButton>
+          <IconButton
+            label={autoScroll ? "Following new lines — click to stop" : "Not following — click to follow new lines"}
+            active={autoScroll}
+            onClick={() => setAutoScroll((a) => !a)}
           >
-            Stats
-          </button>
-
-          {/* Archive load */}
-          <button
-            onClick={handleLoadArchive}
-            disabled={archiveLoading}
-            title="Load archived logs for this container"
-            className="rounded px-2 py-0.5 text-[11px] text-muted hover:bg-surface-2 hover:text-fg disabled:opacity-40"
+            <ChevronsDown size={14} />
+          </IconButton>
+          <IconButton
+            label="Clear buffer"
+            onClick={() => {
+              linesRef.current = []; pendingRef.current = []; setShowingArchive(false);
+              setLinesTick((n) => n + 1);
+            }}
           >
-            {archiveLoading ? "…" : "Archive"}
-          </button>
+            <Eraser size={14} />
+          </IconButton>
 
-          {/* Export dropdown */}
-          <div ref={exportRef} className="relative">
-            <button
-              onClick={() => setExportOpen((o) => !o)}
-              title="Export logs"
-              className="rounded px-2 py-0.5 text-[11px] text-muted hover:bg-surface-2 hover:text-fg"
-            >
-              Export ▾
-            </button>
-            {exportOpen && (
-              <div className="absolute right-0 top-full z-50 mt-1 flex flex-col rounded border border-border bg-surface shadow-lg">
-                <button
-                  onClick={() => handleExport("txt")}
-                  className="px-4 py-1.5 text-left text-[11px] text-fg hover:bg-surface-2"
-                >
-                  Export as .txt
-                </button>
-                <button
-                  onClick={() => handleExport("json")}
-                  className="px-4 py-1.5 text-left text-[11px] text-fg hover:bg-surface-2"
-                >
-                  Export as .json
-                </button>
-              </div>
-            )}
-          </div>
+          <Menu>
+            <MenuTrigger asChild>
+              <IconButton label="More log options">
+                <MoreHorizontal size={14} />
+              </IconButton>
+            </MenuTrigger>
+            <MenuContent>
+              <MenuLabel>View</MenuLabel>
+              <MenuCheckItem checked={statsOpen} onSelect={() => setStatsOpen((o) => !o)}>
+                Container stats
+              </MenuCheckItem>
+              <MenuSub label={`Tail on connect: ${tail >= 1000 ? `${tail / 1000}k` : tail} lines`}>
+                {[100, 500, 2000, 10000].map((n) => (
+                  <MenuCheckItem key={n} checked={tail === n} onSelect={() => setTail(n)}>
+                    {n >= 1000 ? `${n / 1000}k lines` : `${n} lines`}
+                  </MenuCheckItem>
+                ))}
+              </MenuSub>
 
-          {/* Rules button */}
-          <button
-            onClick={() => setRulesOpen(true)}
-            title="Manage filters, highlights and alerts"
-            className="rounded px-2 py-0.5 text-[11px] text-muted hover:bg-surface-2 hover:text-fg"
-          >
-            Rules
-          </button>
+              <MenuSeparator />
+              <MenuLabel>Filter</MenuLabel>
+              <MenuItem disabled={!filter.trim()} onSelect={() => setSavingFilter(true)}>
+                Save current filter…
+              </MenuItem>
+              {filters.length > 0 && (
+                <MenuSub label="Load preset">
+                  {filters.map((f) => (
+                    <MenuItem key={f.id} onSelect={() => setFilter(f.pattern)}>
+                      {f.name}
+                    </MenuItem>
+                  ))}
+                </MenuSub>
+              )}
+              <MenuItem onSelect={() => setRulesOpen(true)}>Rules…</MenuItem>
+
+              <MenuSeparator />
+              <MenuLabel>Data</MenuLabel>
+              <MenuItem disabled={archiveLoading} onSelect={handleLoadArchive}>
+                {archiveLoading ? "Loading archive…" : "Load archived logs"}
+              </MenuItem>
+              <MenuItem onSelect={() => handleExport("txt")}>Export as .txt</MenuItem>
+              <MenuItem onSelect={() => handleExport("json")}>Export as .json</MenuItem>
+            </MenuContent>
+          </Menu>
         </div>
       </div>
+
+      {/* Naming a filter preset is rare enough to belong in a dialog, not the bar. */}
+      <Modal
+        open={savingFilter}
+        onClose={() => { setSavingFilter(false); setSaveFilterName(""); }}
+        title="Save filter preset"
+        description={filter}
+        width="max-w-sm"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => { setSavingFilter(false); setSaveFilterName(""); }}>
+              Cancel
+            </Button>
+            <Button variant="primary" disabled={!saveFilterName.trim()} onClick={handleSaveFilter}>
+              Save
+            </Button>
+          </>
+        }
+      >
+        <Field label="Preset name">
+          <Input
+            autoFocus
+            value={saveFilterName}
+            onChange={(e) => setSaveFilterName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && saveFilterName.trim()) handleSaveFilter(); }}
+            placeholder="errors only"
+          />
+        </Field>
+      </Modal>
 
       {/* ── Stats panel ── */}
       {statsOpen && <StatsPanel stats={stats} loading={statsLoading} />}
@@ -1546,7 +1607,7 @@ function LogPane({
         ) : filtered.length === 0 ? (
           <div className="p-4 text-muted">{streamId ? "Waiting for output…" : "Starting stream…"}</div>
         ) : (
-          <div style={{ height: virtualizer.getTotalSize(), position: "relative", width: "100%" }}>
+          <div style={{ height: virtualizer.getTotalSize(), position: "relative", width: "max-content", minWidth: "100%" }}>
             {virtualizer.getVirtualItems().map((vi) => {
               const line = filtered[vi.index];
               const highlight = compiledHighlights.find((h) => h.re.test(line.text));
@@ -1579,11 +1640,11 @@ function LogPane({
                 <div
                   key={vi.key}
                   data-index={vi.index}
-                  style={{ position: "absolute", top: 0, left: 0, width: "100%", height: ROW_HEIGHT, transform: `translateY(${vi.start}px)` }}
+                  style={{ position: "absolute", top: 0, left: 0, width: "max-content", minWidth: "100%", height: ROW_HEIGHT, transform: `translateY(${vi.start}px)` }}
                   className={`flex items-baseline whitespace-pre px-3 ${baseColor} ${diffBg}`}
                 >
                   {line.ts && <span className="mr-2 shrink-0 text-muted">{line.ts.slice(11, 23)}</span>}
-                  <span className="min-w-0 flex-1 overflow-hidden text-ellipsis">{line.text}</span>
+                  <span className="shrink-0">{line.text}</span>
                   {parsedJson !== undefined && (
                     <button
                       onClick={() => setJsonPanel(jsonPanel?.text === line.text ? null : { text: line.text, parsed: parsedJson })}
@@ -1619,9 +1680,7 @@ function LogPane({
               className="rounded p-0.5 text-muted hover:bg-surface hover:text-fg"
               title="Close JSON viewer"
             >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M18 6 6 18M6 6l12 12" />
-              </svg>
+              <X size={12} />
             </button>
           </div>
           <div className="h-[calc(100%-28px)] overflow-auto px-3 py-2">
@@ -1688,205 +1747,4 @@ function colorizeJson(json: string): React.ReactNode {
   }
   if (last < json.length) parts.push(<span key="tail" className="text-muted">{json.slice(last)}</span>);
   return <>{parts}</>;
-}
-
-// ─── Console pane ─────────────────────────────────────────────────────────────
-
-interface ConsoleEntry {
-  id: number;
-  command: string;
-  result?: RemoteCmdResult;
-  error?: string;
-  pending: boolean;
-  ms?: number;
-  source: "user" | string;
-}
-
-const QUICK_COMMANDS = [
-  "docker ps -a",
-  "docker ps -a --no-trunc --format '{{json .}}'",
-  "which docker",
-  "docker --version",
-  "id",
-  "echo $PATH",
-];
-
-function shellSq(s: string): string {
-  return "'" + s.replace(/'/g, "'\\''") + "'";
-}
-
-function ConsolePane({
-  sessionId,
-  compact,
-  onClose,
-}: {
-  sessionId: string;
-  compact: boolean;
-  onClose: () => void;
-}) {
-  const [input, setInput] = useState("");
-  const [history, setHistory] = useState<ConsoleEntry[]>([]);
-  const [running, setRunning] = useState(false);
-  const [cwd, setCwd] = useState<string>("");
-  const [cmdHistory, setCmdHistory] = useState<string[]>([]);
-  const [historyIdx, setHistoryIdx] = useState(-1);
-  const idRef = useRef(0);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const inputRef = useRef<HTMLInputElement | null>(null);
-
-  const focusInput = useCallback(() => {
-    setTimeout(() => inputRef.current?.focus(), 0);
-  }, []);
-
-  useEffect(() => {
-    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [history]);
-
-  useEffect(() => {
-    let unlisten: (() => void) | null = null;
-    let alive = true;
-    (async () => {
-      const off = await onDiagCommand((d: DiagCommand) => {
-        const id = ++idRef.current;
-        setHistory((h) => [
-          ...h,
-          {
-            id,
-            command: d.command,
-            pending: false,
-            source: d.source,
-            result: { stdout: d.stdout, stderr: d.stderr, exit: d.exit, truncated: false },
-          },
-        ]);
-      });
-      if (alive) unlisten = off; else off();
-    })();
-    return () => { alive = false; if (unlisten) unlisten(); };
-  }, []);
-
-  const submit = useCallback(async (cmd: string) => {
-    const command = cmd.trim();
-    if (!command || running) return;
-    setInput("");
-    setHistoryIdx(-1);
-    setCmdHistory((h) => [command, ...h.slice(0, 99)]);
-    const isCd = /^cd(\s|$)/.test(command);
-    const id = ++idRef.current;
-    setHistory((h) => [...h, { id, command, pending: true, source: "user" }]);
-    setRunning(true);
-    const t0 = performance.now();
-    try {
-      const actualCommand = isCd
-        ? (cwd ? `cd ${shellSq(cwd)} && ${command} && pwd` : `${command} && pwd`)
-        : (cwd ? `cd ${shellSq(cwd)} && ${command}` : command);
-      const result = await api.runRemoteCommand(sessionId, actualCommand);
-      const ms = Math.round(performance.now() - t0);
-      if (isCd && (result.exit === 0 || result.exit == null) && !result.stderr.trim()) {
-        const lines = result.stdout.trimEnd().split("\n");
-        const newCwd = lines[lines.length - 1]?.trim() ?? "";
-        if (newCwd) setCwd(newCwd);
-        const displayStdout = lines.slice(0, -1).join("\n");
-        setHistory((h) => h.map((e) => e.id === id ? { ...e, pending: false, result: { ...result, stdout: displayStdout }, ms } : e));
-      } else {
-        setHistory((h) => h.map((e) => e.id === id ? { ...e, pending: false, result, ms } : e));
-      }
-    } catch (e) {
-      const ms = Math.round(performance.now() - t0);
-      setHistory((h) => h.map((e) => e.id === id ? { ...e, pending: false, error: errorMessage(e), ms } : e));
-    } finally {
-      setRunning(false);
-      focusInput();
-    }
-  }, [sessionId, running, cwd, focusInput]);
-
-  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "ArrowUp") {
-      e.preventDefault();
-      const idx = Math.min(historyIdx + 1, cmdHistory.length - 1);
-      setHistoryIdx(idx);
-      setInput(cmdHistory[idx] ?? "");
-    } else if (e.key === "ArrowDown") {
-      e.preventDefault();
-      const idx = Math.max(historyIdx - 1, -1);
-      setHistoryIdx(idx);
-      setInput(idx === -1 ? "" : (cmdHistory[idx] ?? ""));
-    }
-  }, [historyIdx, cmdHistory]);
-
-  const displayCwd = cwd ? cwd.replace(/^\/(?:home|Users)\/[^/]+/, "~") : "";
-
-  return (
-    <div className={`flex shrink-0 flex-col border-t border-border bg-surface ${compact ? "h-64" : "h-72"}`}>
-      <div className="flex items-center gap-2 border-b border-border px-3 py-1.5 text-[11px]">
-        <span className="font-medium text-fg">Console</span>
-        <span className="text-muted">· {sessionId.slice(0, 8)}…</span>
-        <div className="ml-auto flex flex-wrap items-center gap-1">
-          {QUICK_COMMANDS.map((c) => (
-            <button key={c} onClick={() => submit(c)} disabled={running}
-              className="rounded border border-border bg-surface-2 px-1.5 py-0.5 font-mono text-[10.5px] text-muted hover:text-fg disabled:opacity-50"
-              title={c}>
-              {c.length > 22 ? c.slice(0, 21) + "…" : c}
-            </button>
-          ))}
-          <button onClick={() => setHistory([])} className="rounded px-1.5 py-0.5 text-[10.5px] text-muted hover:bg-surface-2 hover:text-fg">Clear</button>
-          <button onClick={onClose} className="rounded px-1.5 py-0.5 text-[10.5px] text-muted hover:bg-surface-2 hover:text-danger">✕</button>
-        </div>
-      </div>
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto bg-bg px-3 py-2 font-mono text-[12px]">
-        {history.length === 0
-          ? <div className="text-muted">Type a command below, or click a preset above.</div>
-          : history.map((e) => <ConsoleEntryView key={e.id} entry={e} />)
-        }
-      </div>
-      <form onSubmit={(ev) => { ev.preventDefault(); submit(input); }}
-        className="flex items-center gap-2 border-t border-border px-3 py-2">
-        <span className="shrink-0 font-mono text-[12px] text-muted">
-          {displayCwd && <span className="text-accent/80">{displayCwd}</span>}
-          {" $"}
-        </span>
-        <input
-          ref={inputRef}
-          value={input}
-          onChange={(ev) => { setInput(ev.target.value); setHistoryIdx(-1); }}
-          onKeyDown={handleKeyDown}
-          disabled={running}
-          placeholder="docker ps -a"
-          autoFocus
-          className="flex-1 bg-transparent font-mono text-[12px] text-fg outline-none placeholder:text-muted"
-        />
-        <Button variant="primary" type="submit" disabled={running || !input.trim()} className="px-3 py-1 text-xs">
-          {running ? "…" : "Run"}
-        </Button>
-      </form>
-    </div>
-  );
-}
-
-function ConsoleEntryView({ entry }: { entry: ConsoleEntry }) {
-  const exit = entry.result?.exit;
-  const exitColor = entry.error ? "text-danger" : exit == null ? "text-muted" : exit === 0 ? "text-ok" : "text-warn";
-  return (
-    <div className="mb-3">
-      <div className="flex items-center gap-2 text-muted">
-        {entry.source !== "user"
-          ? <span className="shrink-0 rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-accent" title={`beacon:${entry.source}`}>{entry.source}</span>
-          : <span>$</span>
-        }
-        <span className="min-w-0 flex-1 break-all text-fg">{entry.command}</span>
-        <span className="shrink-0 text-[10.5px]">
-          {entry.pending ? "running…" : entry.ms != null ? `${entry.ms}ms` : ""}
-          {!entry.pending && (entry.error || exit != null) && (
-            <span className={`ml-2 ${exitColor}`}>{entry.error ? "error" : `exit ${exit}`}</span>
-          )}
-          {!entry.pending && !entry.error && exit == null && entry.source !== "user" && (
-            <span className="ml-2 text-accent">(streaming)</span>
-          )}
-        </span>
-      </div>
-      {entry.error && <div className="mt-1 whitespace-pre-wrap text-danger">{entry.error}</div>}
-      {entry.result?.stdout && <pre className="mt-1 whitespace-pre-wrap text-fg">{entry.result.stdout}</pre>}
-      {entry.result?.stderr && <pre className="mt-1 whitespace-pre-wrap text-danger/90">{entry.result.stderr}</pre>}
-      {entry.result?.truncated && <div className="mt-1 text-[10.5px] text-warn">(output truncated)</div>}
-    </div>
-  );
 }

@@ -6,11 +6,14 @@ type VaultStatus = "unknown" | "uninitialized" | "locked" | "unlocked";
 
 interface AppState {
   vaultStatus: VaultStatus;
+  /** True when a master password is stored in the OS credential store. */
+  passwordRemembered: boolean;
   sessions: Session[];
   loadingSessions: boolean;
   categories: Category[];
   s3Config: S3ConfigPublic | null;
   bootstrap: () => Promise<void>;
+  setPasswordRemembered: (v: boolean) => void;
   setUnlocked: () => Promise<void>;
   lock: () => Promise<void>;
   refreshSessions: () => Promise<void>;
@@ -25,15 +28,24 @@ interface AppState {
 
 export const useApp = create<AppState>((set, get) => ({
   vaultStatus: "unknown",
+  passwordRemembered: false,
   sessions: [],
   loadingSessions: false,
   categories: [],
   s3Config: null,
 
   async bootstrap() {
+    const remembered = await api.vaultHasRememberedPassword().catch(() => false);
+    set({ passwordRemembered: remembered });
     const init = await api.vaultIsInitialized();
     if (!init) { set({ vaultStatus: "uninitialized" }); return; }
-    const unlocked = await api.vaultIsUnlocked();
+    let unlocked = await api.vaultIsUnlocked();
+    // A remembered password unlocks silently on launch. A stale one is dropped
+    // by the backend, so we re-read the flag rather than trusting the old value.
+    if (!unlocked && remembered) {
+      unlocked = await api.vaultUnlockRemembered().catch(() => false);
+      if (!unlocked) set({ passwordRemembered: false });
+    }
     set({ vaultStatus: unlocked ? "unlocked" : "locked" });
     if (unlocked) {
       await Promise.all([
@@ -78,6 +90,10 @@ export const useApp = create<AppState>((set, get) => ({
   async refreshS3Config() {
     const s3Config = await s3Api.getConfig().catch(() => null);
     set({ s3Config });
+  },
+
+  setPasswordRemembered(v) {
+    set({ passwordRemembered: v });
   },
 
   setS3Config(config) {

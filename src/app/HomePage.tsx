@@ -1,11 +1,11 @@
 import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
-import { api, errorMessage, Session, SshTestResult } from "../lib/ipc";
+import { useNavigate } from "react-router-dom";
+import { api, errorMessage, Session } from "../lib/ipc";
 import { useApp } from "../lib/store";
 import { SessionWizard } from "../features/sessions/SessionWizard";
 import { ExportModal } from "../features/sessions/ExportModal";
 import { ImportModal } from "../features/sessions/ImportModal";
-import { Button, Toast } from "../components/ui";
+import { Button, ConfirmDialog, Toast } from "../components/ui";
 
 export function HomePage() {
   const sessions = useApp((s) => s.sessions);
@@ -13,6 +13,7 @@ export function HomePage() {
   const loading = useApp((s) => s.loadingSessions);
   const removeLocal = useApp((s) => s.removeSessionLocal);
   const refresh = useApp((s) => s.refreshSessions);
+  const navigate = useNavigate();
 
   // Group sessions by category. Uncategorised go last.
   const groups = useMemo(() => {
@@ -40,7 +41,6 @@ export function HomePage() {
   const [editing, setEditing] = useState<Session | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
-  const [busyId, setBusyId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ kind: "ok" | "error" | "info"; message: string } | null>(null);
 
   function flash(kind: "ok" | "error" | "info", message: string) {
@@ -51,21 +51,12 @@ export function HomePage() {
   function openNew() { setEditing(null); setWizardOpen(true); }
   function openEdit(s: Session) { setEditing(s); setWizardOpen(true); }
 
-  async function onTest(s: Session) {
-    setBusyId(s.id);
-    try {
-      const r: SshTestResult = await api.testSession(s.id);
-      flash("ok", `✓ ${s.name}: ${r.remote_user ?? "?"} · ${r.remote_uname?.slice(0, 60) ?? ""}`);
-      await refresh();
-    } catch (e) {
-      flash("error", `${s.name}: ${errorMessage(e)}`);
-    } finally {
-      setBusyId(null);
-    }
-  }
+  const [pendingDelete, setPendingDelete] = useState<Session | null>(null);
 
-  async function onDelete(s: Session) {
-    if (!confirm(`Delete session "${s.name}"? This cannot be undone.`)) return;
+  async function confirmDelete() {
+    const s = pendingDelete;
+    if (!s) return;
+    setPendingDelete(null);
     try {
       await api.deleteSession(s.id);
       removeLocal(s.id);
@@ -93,9 +84,9 @@ export function HomePage() {
 
         <section className="space-y-6">
           {loading && sessions.length === 0 ? (
-            <div className="rounded-xl border border-border bg-surface p-8 text-center text-sm text-muted">Loading…</div>
+            <div className="rounded-xl border border-border bg-surface/70 p-8 text-center text-sm text-muted backdrop-blur-sm">Loading…</div>
           ) : sessions.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-border bg-surface/40 p-10 text-center">
+            <div className="rounded-xl border border-dashed border-border bg-surface/40 p-10 text-center backdrop-blur-sm">
               <div className="text-sm text-muted">No sessions yet.</div>
               <Button variant="primary" onClick={openNew} className="mt-4">+ Add your first session</Button>
             </div>
@@ -117,10 +108,9 @@ export function HomePage() {
                       <SessionTile
                         key={s.id}
                         session={s}
-                        busy={busyId === s.id}
-                        onTest={() => onTest(s)}
+                        onConnect={() => navigate(`/workspace/${s.id}`)}
                         onEdit={() => openEdit(s)}
-                        onDelete={() => onDelete(s)}
+                        onDelete={() => setPendingDelete(s)}
                       />
                     ))}
                   </div>
@@ -141,16 +131,25 @@ export function HomePage() {
       <ExportModal open={exportOpen} onClose={() => setExportOpen(false)} />
       <ImportModal open={importOpen} onClose={() => { setImportOpen(false); refresh(); }} />
       {toast && <Toast kind={toast.kind} message={toast.message} />}
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        onOpenChange={(o) => { if (!o) setPendingDelete(null); }}
+        title={`Delete "${pendingDelete?.name ?? ""}"?`}
+        body="The saved session and its stored credentials are removed from the vault. This cannot be undone."
+        confirmLabel="Delete session"
+        destructive
+        onConfirm={confirmDelete}
+      />
     </div>
   );
 }
 
 function SessionTile({
-  session, busy, onTest, onEdit, onDelete,
+  session, onConnect, onEdit, onDelete,
 }: {
   session: Session;
-  busy: boolean;
-  onTest: () => void;
+  onConnect: () => void;
   onEdit: () => void;
   onDelete: () => void;
 }) {
@@ -158,9 +157,9 @@ function SessionTile({
     ? new Date(session.last_connected * 1000).toLocaleString()
     : "never";
   return (
-    <div className="group rounded-xl border border-border bg-surface p-5 transition-colors hover:border-accent/40">
+    <div className="group rounded-xl border border-border bg-surface/70 p-5 backdrop-blur-sm transition-colors hover:border-accent/40 hover:bg-surface/85">
       <div className="flex items-start justify-between gap-3">
-        <Link to={`/workspace/${session.id}`} className="min-w-0 flex-1">
+        <button onClick={onConnect} className="min-w-0 flex-1 text-left">
           <div className="flex items-center gap-2">
             <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: session.color }} />
             <div className="truncate text-[15px] font-semibold">{session.name}</div>
@@ -171,15 +170,15 @@ function SessionTile({
           <div className="mt-1 truncate font-mono text-xs text-muted">
             {session.username}@{session.host}:{session.port}
           </div>
-        </Link>
+        </button>
       </div>
       <div className="mt-4 flex items-center justify-between text-xs text-muted">
         <span>Last seen {last}</span>
         <span className="uppercase tracking-wider">{session.auth_kind}</span>
       </div>
       <div className="mt-4 flex items-center gap-2">
-        <Button variant="primary" onClick={onTest} disabled={busy} className="flex-1 text-xs">
-          {busy ? "Testing…" : "Test connection"}
+        <Button variant="primary" onClick={onConnect} className="flex-1 text-xs">
+          Connect
         </Button>
         <Button variant="ghost" onClick={onEdit} className="text-xs">Edit</Button>
         <Button variant="ghost" onClick={onDelete} className="text-xs text-muted hover:text-danger">Delete</Button>

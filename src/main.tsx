@@ -8,6 +8,7 @@ import { App } from "./app/App";
 import { HomePage } from "./app/HomePage";
 import { WorkspacePage } from "./app/WorkspacePage";
 import { SettingsPage } from "./app/SettingsPage";
+import { HelpPage } from "./app/HelpPage";
 
 const router = createBrowserRouter([
   {
@@ -18,6 +19,7 @@ const router = createBrowserRouter([
       { path: "workspace", element: <WorkspacePage /> },
       { path: "workspace/:sessionId", element: <WorkspacePage /> },
       { path: "settings", element: <SettingsPage /> },
+      { path: "help", element: <HelpPage /> },
     ],
   },
 ]);

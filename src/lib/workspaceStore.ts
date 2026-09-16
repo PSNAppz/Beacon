@@ -13,9 +13,10 @@ export interface Tab {
 }
 
 const TABS_KEY = "beacon:tabs:v1";
+const PINNED_KEY = "beacon:pinned:v1";
 const MAX_BACKOFF_MS = 60_000;
 
-function saveTabs(tabs: Tab[]) {
+export function saveTabs(tabs: Tab[]) {
   try { localStorage.setItem(TABS_KEY, JSON.stringify(tabs)); } catch {}
 }
 
@@ -24,6 +25,17 @@ export function loadSavedTabs(): Tab[] {
     const raw = localStorage.getItem(TABS_KEY);
     return raw ? (JSON.parse(raw) as Tab[]) : [];
   } catch { return []; }
+}
+
+function loadPinned(): string[] {
+  try {
+    const raw = localStorage.getItem(PINNED_KEY);
+    return raw ? (JSON.parse(raw) as string[]) : [];
+  } catch { return []; }
+}
+
+function savePinned(ids: string[]) {
+  try { localStorage.setItem(PINNED_KEY, JSON.stringify(ids)); } catch {}
 }
 
 // Reconnect timers live outside the store — timers aren't serialisable state.
@@ -62,6 +74,10 @@ export interface WorkspaceStore {
   activeTabId: string | null;
   splitTabId: string | null;
 
+  /** Session ids kept in the workspace sidebar even while disconnected.
+   *  Everything else disappears from the sidebar once it is no longer live. */
+  pinned: string[];
+
   /** True once the saved-tabs restore has run. Persists across remounts so the
    *  restore logic doesn't fire again when the user navigates back to Workspace. */
   storageRestored: boolean;
@@ -75,6 +91,7 @@ export interface WorkspaceStore {
   setActiveTab: (tabId: string) => void;
   setSplitTab: (tabId: string | null) => void;
   markStorageRestored: () => void;
+  togglePin: (sessionId: string) => void;
   /** Called when the user enters a workspace tab. If the session isn't
    *  connected, fire an immediate reconnect (resets backoff). */
   touchSession: (sessionId: string) => void;
@@ -92,10 +109,22 @@ export const useWorkspace = create<WorkspaceStore>((set, get) => ({
   activeTabId: null,
   splitTabId: null,
 
+  pinned: loadPinned(),
+
   storageRestored: false,
 
   markStorageRestored() {
     set({ storageRestored: true });
+  },
+
+  togglePin(sessionId) {
+    set((s) => {
+      const pinned = s.pinned.includes(sessionId)
+        ? s.pinned.filter((id) => id !== sessionId)
+        : [...s.pinned, sessionId];
+      savePinned(pinned);
+      return { pinned };
+    });
   },
 
   async connect(sessionId) {

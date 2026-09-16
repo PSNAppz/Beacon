@@ -19,6 +19,10 @@ pub enum AppError {
     Crypto(String),
     #[error("ssh: {0}")]
     Ssh(String),
+    /// An SSH private key is group/world readable, so `ssh` refuses to use it.
+    /// The prefix is load-bearing: the UI matches on it to offer a one-click fix.
+    #[error("key-permissions: {0}")]
+    KeyPermissions(String),
     #[error("{0}")]
     Other(String),
 }

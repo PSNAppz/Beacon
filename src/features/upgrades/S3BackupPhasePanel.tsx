@@ -36,12 +36,12 @@ export function S3BackupPhasePanel({ phase, onProceed, onCancel }: Props) {
         <div className="flex items-center gap-2">
           {done ? (
             failures > 0 ? (
-              <span className="text-red-400">✗</span>
+              <span className="text-danger">✗</span>
             ) : (
-              <span className="text-emerald-400">✓</span>
+              <span className="text-ok">✓</span>
             )
           ) : (
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="animate-spin text-indigo-400">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="animate-spin text-accent">
               <path d="M21 12a9 9 0 1 1-6.219-8.56" />
             </svg>
           )}
@@ -67,15 +67,15 @@ export function S3BackupPhasePanel({ phase, onProceed, onCancel }: Props) {
           <div key={i} className="flex items-start gap-2.5">
             <span className="shrink-0 mt-0.5 w-4 text-center">
               {item.status === "uploading" ? (
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="animate-spin text-indigo-400">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="animate-spin text-accent">
                   <path d="M21 12a9 9 0 1 1-6.219-8.56" />
                 </svg>
               ) : item.status === "done" ? (
-                <span className="text-emerald-400 text-[11px]">✓</span>
+                <span className="text-ok text-[11px]">✓</span>
               ) : item.status === "skipped" ? (
                 <span className="text-white/30 text-[11px]">–</span>
               ) : (
-                <span className="text-red-400 text-[11px]">✗</span>
+                <span className="text-danger text-[11px]">✗</span>
               )}
             </span>
             <div className="min-w-0">
@@ -87,7 +87,7 @@ export function S3BackupPhasePanel({ phase, onProceed, onCancel }: Props) {
                 <div className="text-white/25 text-[11px] mt-0.5">no new logs</div>
               )}
               {item.status === "error" && item.error && (
-                <div className="text-red-400/70 text-[11px] mt-0.5">{item.error}</div>
+                <div className="text-danger/70 text-[11px] mt-0.5">{item.error}</div>
               )}
             </div>
           </div>
@@ -96,8 +96,8 @@ export function S3BackupPhasePanel({ phase, onProceed, onCancel }: Props) {
 
       {/* Footer — only shown when waiting for confirmation */}
       {phase.awaitingConfirm && (
-        <div className="shrink-0 flex items-center justify-between gap-3 px-4 py-2 border-t border-white/8 bg-red-950/20">
-          <span className="text-red-300/70 text-[12px] font-sans">
+        <div className="shrink-0 flex items-center justify-between gap-3 px-4 py-2 border-t border-white/8 bg-danger/10">
+          <span className="text-danger/70 text-[12px] font-sans">
             {failures} backup{failures > 1 ? "s" : ""} failed. Proceed with upgrade anyway?
           </span>
           <div className="flex gap-2">
@@ -109,7 +109,7 @@ export function S3BackupPhasePanel({ phase, onProceed, onCancel }: Props) {
             </button>
             <button
               onClick={onProceed}
-              className="px-3 py-1 text-[12px] font-sans bg-red-600/80 hover:bg-red-500/80 text-white rounded transition-colors"
+              className="px-3 py-1 text-[12px] font-sans bg-danger/80 hover:bg-danger text-bg rounded transition-colors"
             >
               Proceed Anyway
             </button>

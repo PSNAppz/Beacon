@@ -34,9 +34,9 @@ const STATUS_ICON: Record<StepStatus, string> = {
 
 const STATUS_COLOR: Record<StepStatus, string> = {
   pending: "text-white/25",
-  running: "text-indigo-400",
-  done: "text-emerald-400",
-  failed: "text-red-400",
+  running: "text-accent",
+  done: "text-ok",
+  failed: "text-danger",
 };
 
 export function UpgradeRunPanel({ sessionId, runId, steps, onClose, onComplete }: Props) {
@@ -129,8 +129,8 @@ export function UpgradeRunPanel({ sessionId, runId, steps, onClose, onComplete }
           <span
             className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium ${
               success
-                ? "bg-emerald-500/15 text-emerald-400"
-                : "bg-red-500/15 text-red-400"
+                ? "bg-ok/15 text-ok"
+                : "bg-danger/15 text-danger"
             }`}
           >
             {success ? "✓ Complete" : "✗ Failed"}
@@ -169,7 +169,7 @@ export function UpgradeRunPanel({ sessionId, runId, steps, onClose, onComplete }
               </span>
               <span className="text-white/70">{step.command}</span>
               {step.exitCode !== undefined && step.exitCode !== 0 && (
-                <span className="text-red-400/60 text-[10px]">exit {step.exitCode}</span>
+                <span className="text-danger/60 text-[10px]">exit {step.exitCode}</span>
               )}
             </div>
 
@@ -180,9 +180,9 @@ export function UpgradeRunPanel({ sessionId, runId, steps, onClose, onComplete }
                     key={j}
                     className={`leading-relaxed ${
                       line.is_prompt
-                        ? "text-amber-300/90 font-semibold"
+                        ? "text-warn/90 font-semibold"
                         : line.is_stderr
-                        ? "text-red-300/70"
+                        ? "text-danger/70"
                         : "text-white/50"
                     }`}
                   >
@@ -226,7 +226,7 @@ export function UpgradeRunPanel({ sessionId, runId, steps, onClose, onComplete }
           <button
             onClick={sendInput}
             disabled={done || activeStep === null}
-            className="shrink-0 text-muted hover:text-indigo-400 disabled:opacity-20 transition-colors text-xs"
+            className="shrink-0 text-muted hover:text-accent disabled:opacity-20 transition-colors text-xs"
             title="Send (Enter)"
           >
             ↵
